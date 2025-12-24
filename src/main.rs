@@ -40,9 +40,9 @@ async fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
     loop {
         terminal.draw(|f| ui::draw(f, app))?;
 
-        if event::poll(std::time::Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
+        if event::poll(std::time::Duration::from_millis(100))?
+            && let Event::Key(key) = event::read()?
+                && key.kind == KeyEventKind::Press {
                     if app.is_editing {
                         match key.code {
                             KeyCode::Esc => {
@@ -82,8 +82,8 @@ async fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                             KeyCode::Char('k') | KeyCode::Up => app.previous_setting(),
                             KeyCode::Enter => {
                                 // Handle config change
-                                if let Some(idx) = app.settings_state.selected() {
-                                    if let Some(entry) = app.settings_items.get(idx).cloned() {
+                                if let Some(idx) = app.settings_state.selected()
+                                    && let Some(entry) = app.settings_items.get(idx).cloned() {
                                         match entry {
                                             ConfigEntry::MixedPort | ConfigEntry::BindAddress | ConfigEntry::BaseUrl | ConfigEntry::ApiSecret => {
                                                 app.is_editing = true;
@@ -109,7 +109,6 @@ async fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                                             }
                                         }
                                     }
-                                }
                             }
                             _ => {}
                         }
@@ -150,14 +149,13 @@ async fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                             }
                             KeyCode::Enter => {
                                 if let Focus::Proxies = app.focus {
-                                    if let Some(group_name) = app.get_selected_group_name() {
-                                        if let Some(proxy_name) = app.get_selected_proxy_name() {
+                                    if let Some(group_name) = app.get_selected_group_name()
+                                        && let Some(proxy_name) = app.get_selected_proxy_name() {
                                             let g_name = group_name.clone();
                                             let p_name = proxy_name.clone();
                                             let _ = app.select_proxy(&g_name, &p_name).await;
                                             let _ = app.fetch_proxies().await; 
                                         }
-                                    }
                                 } else {
                                     app.focus = Focus::Proxies;
                                 }
@@ -166,8 +164,6 @@ async fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                         }
                     }
                 }
-            }
-        }
     }
 }
 
@@ -211,8 +207,8 @@ async fn handle_setting_change(app: &mut App, entry: ConfigEntry) -> Result<()> 
 }
 
 async fn commit_edit(app: &mut App) -> Result<()> {
-    if let Some(idx) = app.settings_state.selected() {
-        if let Some(entry) = app.settings_items.get(idx).cloned() {
+    if let Some(idx) = app.settings_state.selected()
+        && let Some(entry) = app.settings_items.get(idx).cloned() {
             match entry {
                 ConfigEntry::MixedPort => {
                     if let Ok(port) = app.editing_value.parse::<u16>() {
@@ -237,6 +233,5 @@ async fn commit_edit(app: &mut App) -> Result<()> {
                 _ => {}
             }
         }
-    }
     Ok(())
 }

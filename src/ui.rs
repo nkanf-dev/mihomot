@@ -95,11 +95,10 @@ fn draw_proxies(f: &mut Frame, app: &mut App, area: Rect) {
                     .iter()
                     .map(|name| {
                         let mut style = Style::default();
-                        if let Some(now) = &group.now {
-                            if now == name {
+                        if let Some(now) = &group.now
+                            && now == name {
                                 style = style.fg(Color::Green);
                             }
-                        }
                         ListItem::new(Line::from(name.as_str())).style(style)
                     })
                     .collect();

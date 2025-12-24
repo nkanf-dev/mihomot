@@ -166,13 +166,12 @@ impl App {
     }
 
     fn load_app_settings() -> Result<AppSettings> {
-        if let Some(path) = Self::get_config_path() {
-            if path.exists() {
+        if let Some(path) = Self::get_config_path()
+            && path.exists() {
                 let content = fs::read_to_string(path)?;
                 let settings: AppSettings = serde_json::from_str(&content)?;
                 return Ok(settings);
             }
-        }
         Ok(AppSettings {
             base_url: "http://127.0.0.1:9090".to_string(),
             api_secret: std::env::var("MIHOMO_SECRET").unwrap_or_else(|_| "mihomo".to_string()),
@@ -350,10 +349,10 @@ impl App {
     }
 
     pub fn next_proxy(&mut self) {
-        if let Some(group_idx) = self.group_state.selected() {
-             if let Some(group_name) = self.group_names.get(group_idx) {
-                 if let Some(group) = self.proxies.get(group_name) {
-                     if let Some(all) = &group.all {
+        if let Some(group_idx) = self.group_state.selected()
+             && let Some(group_name) = self.group_names.get(group_idx)
+                 && let Some(group) = self.proxies.get(group_name)
+                     && let Some(all) = &group.all {
                          let i = match self.proxy_state.selected() {
                              Some(i) => {
                                  if i >= all.len() - 1 {
@@ -366,16 +365,13 @@ impl App {
                          };
                          self.proxy_state.select(Some(i));
                      }
-                 }
-             }
-        }
     }
 
     pub fn previous_proxy(&mut self) {
-        if let Some(group_idx) = self.group_state.selected() {
-             if let Some(group_name) = self.group_names.get(group_idx) {
-                 if let Some(group) = self.proxies.get(group_name) {
-                     if let Some(all) = &group.all {
+        if let Some(group_idx) = self.group_state.selected()
+             && let Some(group_name) = self.group_names.get(group_idx)
+                 && let Some(group) = self.proxies.get(group_name)
+                     && let Some(all) = &group.all {
                          let i = match self.proxy_state.selected() {
                              Some(i) => {
                                  if i == 0 {
@@ -388,9 +384,6 @@ impl App {
                          };
                          self.proxy_state.select(Some(i));
                      }
-                 }
-             }
-        }
     }
     
     pub fn get_selected_group_name(&self) -> Option<&String> {
@@ -398,13 +391,11 @@ impl App {
     }
 
     pub fn get_selected_proxy_name(&self) -> Option<String> {
-        if let Some(group_name) = self.get_selected_group_name() {
-             if let Some(group) = self.proxies.get(group_name) {
-                 if let Some(all) = &group.all {
+        if let Some(group_name) = self.get_selected_group_name()
+             && let Some(group) = self.proxies.get(group_name)
+                 && let Some(all) = &group.all {
                      return self.proxy_state.selected().and_then(|i| all.get(i).cloned());
                  }
-             }
-        }
         None
     }
 }
