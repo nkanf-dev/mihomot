@@ -187,36 +187,30 @@ fn draw_overview(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(info_text), chunks[0]);
 
     // 2. Connection Test (Latency)
-    let latency_label = if let Some(ms) = app.google_latency {
-        format!("{} ms", ms)
-    } else {
-        "Testing...".to_string()
-    };
-
-    let latency_color = if let Some(ms) = app.google_latency {
-        if ms < 200 {
-            Color::Green
-        } else if ms < 500 {
-            Color::Yellow
-        } else {
-            Color::Red
+    let (latency_label, latency_color, percent) = match &app.latency_status {
+        crate::app::LatencyStatus::Pending => ("Idle".to_string(), Color::Gray, 0),
+        crate::app::LatencyStatus::Testing => ("Testing...".to_string(), Color::Yellow, 0),
+        crate::app::LatencyStatus::Success(ms) => {
+            let color = if *ms < 200 {
+                Color::Green
+            } else if *ms < 500 {
+                Color::Yellow
+            } else {
+                Color::Red
+            };
+            (
+                format!("{} ms", ms),
+                color,
+                (1000.0 / (*ms as f64).max(10.0) * 100.0).min(100.0) as u16,
+            )
         }
-    } else {
-        Color::Gray
+        crate::app::LatencyStatus::Failed(msg) => (format!("Err: {}", msg), Color::Red, 100),
     };
 
     let gauge = Gauge::default()
-        .block(
-            Block::default()
-                .title("Google Latency")
-                .borders(Borders::ALL),
-        )
+        .block(Block::default().title("Test Latency").borders(Borders::ALL))
         .gauge_style(Style::default().fg(latency_color))
-        .percent(if let Some(ms) = app.google_latency {
-            (1000.0 / (ms as f64).max(10.0) * 100.0).min(100.0) as u16
-        } else {
-            0
-        })
+        .percent(percent)
         .label(latency_label);
 
     f.render_widget(gauge, chunks[1]);
@@ -291,6 +285,14 @@ fn draw_settings(f: &mut Frame, app: &mut App) {
                     } else {
                         "******".to_string()
                     },
+                    "Edit",
+                ),
+                ConfigEntry::TestUrl => {
+                    ("App: Test URL", app.app_settings.test_url.clone(), "Edit")
+                }
+                ConfigEntry::TestTimeout => (
+                    "App: Test Timeout (ms)",
+                    app.app_settings.test_timeout.to_string(),
                     "Edit",
                 ),
                 ConfigEntry::Mode => {

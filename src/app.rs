@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::time::Duration;
+use tokio::sync::mpsc;
 
 #[derive(Debug, Deserialize, Clone)]
 #[allow(dead_code)]
@@ -47,17 +49,49 @@ pub struct ProxiesResponse {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppSettings {
+    #[serde(default = "default_base_url")]
     pub base_url: String,
+    #[serde(default = "default_api_secret")]
     pub api_secret: String,
+    #[serde(default = "default_test_url")]
+    pub test_url: String,
+    #[serde(default = "default_test_timeout")]
+    pub test_timeout: u64,
+}
+
+fn default_base_url() -> String {
+    "http://127.0.0.1:9090".to_string()
+}
+
+fn default_api_secret() -> String {
+    std::env::var("MIHOMO_SECRET").unwrap_or_else(|_| "mihomo".to_string())
+}
+
+fn default_test_url() -> String {
+    "https://www.google.com".to_string()
+}
+
+fn default_test_timeout() -> u64 {
+    3000
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            base_url: "http://127.0.0.1:9090".to_string(),
-            api_secret: "mihomo".to_string(),
+            base_url: default_base_url(),
+            api_secret: default_api_secret(),
+            test_url: default_test_url(),
+            test_timeout: default_test_timeout(),
         }
     }
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub enum LatencyStatus {
+    Pending,
+    Testing,
+    Success(u64),
+    Failed(String),
 }
 
 #[derive(Clone, PartialEq)]
@@ -72,6 +106,8 @@ pub enum ConfigEntry {
     // App Settings
     BaseUrl,
     ApiSecret,
+    TestUrl,
+    TestTimeout,
     // Mihomo Config
     Mode,
     Tun,
@@ -85,9 +121,13 @@ pub enum ConfigEntry {
 pub struct App {
     pub proxies: HashMap<String, ProxyItem>,
     pub config: Option<Config>,
-    pub google_latency: Option<u64>,
+    pub latency_status: LatencyStatus,
     pub client: Client,
     pub app_settings: AppSettings,
+
+    // Async Task Communication
+    pub latency_tx: mpsc::Sender<LatencyStatus>,
+    pub latency_rx: mpsc::Receiver<LatencyStatus>,
 
     // UI State
     pub group_names: Vec<String>,
@@ -120,6 +160,8 @@ impl App {
         let settings_items = vec![
             ConfigEntry::BaseUrl,
             ConfigEntry::ApiSecret,
+            ConfigEntry::TestUrl,
+            ConfigEntry::TestTimeout,
             ConfigEntry::Mode,
             ConfigEntry::Tun,
             ConfigEntry::MixedPort,
@@ -129,14 +171,17 @@ impl App {
             ConfigEntry::Ipv6,
         ];
 
-        let app_settings = Self::load_app_settings().unwrap_or_default();
+        let app_settings = Self::load_app_settings();
+        let (latency_tx, latency_rx) = mpsc::channel(10);
 
         Self {
             proxies: HashMap::new(),
             config: None,
-            google_latency: None,
-            client: Client::new(),
+            latency_status: LatencyStatus::Pending,
+            client: Client::builder().build().unwrap_or_default(),
             app_settings,
+            latency_tx,
+            latency_rx,
             group_names: Vec::new(),
             group_state,
             proxy_state,
@@ -165,18 +210,14 @@ impl App {
         }
     }
 
-    fn load_app_settings() -> Result<AppSettings> {
+    fn load_app_settings() -> AppSettings {
         if let Some(path) = Self::get_config_path()
             && path.exists()
+            && let Ok(content) = fs::read_to_string(path)
         {
-            let content = fs::read_to_string(path)?;
-            let settings: AppSettings = serde_json::from_str(&content)?;
-            return Ok(settings);
+            return serde_json::from_str(&content).unwrap_or_default();
         }
-        Ok(AppSettings {
-            base_url: "http://127.0.0.1:9090".to_string(),
-            api_secret: std::env::var("MIHOMO_SECRET").unwrap_or_else(|_| "mihomo".to_string()),
-        })
+        AppSettings::default()
     }
 
     pub fn save_app_settings(&self) -> Result<()> {
@@ -284,27 +325,46 @@ impl App {
         Ok(())
     }
 
-    pub async fn test_latency(&mut self) -> Result<()> {
-        // Direct latency test to Google
-        use std::time::Instant;
+    pub fn trigger_latency_test(&mut self) {
+        let client = self.client.clone();
+        let url = self.app_settings.test_url.clone();
+        let timeout = self.app_settings.test_timeout;
+        let tx = self.latency_tx.clone();
 
-        let start = Instant::now();
-        let request = self.client.head("https://www.google.com");
+        self.latency_status = LatencyStatus::Testing;
 
-        match request.send().await {
-            Ok(resp) => {
-                if resp.status().is_success() || resp.status().is_redirection() {
-                    let delay = start.elapsed().as_millis() as u64;
-                    self.google_latency = Some(delay);
-                } else {
-                    self.google_latency = None;
+        tokio::spawn(async move {
+            use std::time::Instant;
+            let start = Instant::now();
+
+            match client
+                .head(&url)
+                .timeout(Duration::from_millis(timeout))
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    if resp.status().is_success() || resp.status().is_redirection() {
+                        let delay = start.elapsed().as_millis() as u64;
+                        let _ = tx.send(LatencyStatus::Success(delay)).await;
+                    } else {
+                        let _ = tx
+                            .send(LatencyStatus::Failed(format!("Status: {}", resp.status())))
+                            .await;
+                    }
+                }
+                Err(e) => {
+                    let msg = if e.is_timeout() {
+                        "Timeout".to_string()
+                    } else if e.is_connect() {
+                        "Conn Err".to_string()
+                    } else {
+                        "Error".to_string()
+                    };
+                    let _ = tx.send(LatencyStatus::Failed(msg)).await;
                 }
             }
-            Err(_) => {
-                self.google_latency = None;
-            }
-        }
-        Ok(())
+        });
     }
 
     pub async fn select_proxy(&self, group_name: &str, proxy_name: &str) -> Result<()> {

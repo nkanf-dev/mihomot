@@ -24,7 +24,7 @@ async fn main() -> Result<()> {
     let mut app = App::new();
     let _ = app.fetch_proxies().await;
     let _ = app.fetch_config().await;
-    let _ = app.test_latency().await;
+    app.trigger_latency_test();
 
     let app_result = run_app(&mut terminal, &mut app).await;
 
@@ -39,6 +39,11 @@ async fn main() -> Result<()> {
 async fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
     loop {
         terminal.draw(|f| ui::draw(f, app))?;
+
+        // Check for latency updates
+        if let Ok(status) = app.latency_rx.try_recv() {
+            app.latency_status = status;
+        }
 
         if event::poll(std::time::Duration::from_millis(100))?
             && let Event::Key(key) = event::read()?
@@ -90,7 +95,9 @@ async fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                                 ConfigEntry::MixedPort
                                 | ConfigEntry::BindAddress
                                 | ConfigEntry::BaseUrl
-                                | ConfigEntry::ApiSecret => {
+                                | ConfigEntry::ApiSecret
+                                | ConfigEntry::TestUrl
+                                | ConfigEntry::TestTimeout => {
                                     app.is_editing = true;
                                     if let Some(config) = &app.config {
                                         app.editing_value = match entry {
@@ -102,11 +109,20 @@ async fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                                             ConfigEntry::ApiSecret => {
                                                 app.app_settings.api_secret.clone()
                                             }
+                                            ConfigEntry::TestUrl => {
+                                                app.app_settings.test_url.clone()
+                                            }
+                                            ConfigEntry::TestTimeout => {
+                                                app.app_settings.test_timeout.to_string()
+                                            }
                                             _ => String::new(),
                                         };
                                     } else if matches!(
                                         entry,
-                                        ConfigEntry::BaseUrl | ConfigEntry::ApiSecret
+                                        ConfigEntry::BaseUrl
+                                            | ConfigEntry::ApiSecret
+                                            | ConfigEntry::TestUrl
+                                            | ConfigEntry::TestTimeout
                                     ) {
                                         // Fallback if config is not loaded yet (e.g. wrong URL initially)
                                         app.editing_value = match entry {
@@ -115,6 +131,12 @@ async fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                                             }
                                             ConfigEntry::ApiSecret => {
                                                 app.app_settings.api_secret.clone()
+                                            }
+                                            ConfigEntry::TestUrl => {
+                                                app.app_settings.test_url.clone()
+                                            }
+                                            ConfigEntry::TestTimeout => {
+                                                app.app_settings.test_timeout.to_string()
                                             }
                                             _ => String::new(),
                                         };
@@ -136,7 +158,7 @@ async fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                         let _ = app.fetch_config().await;
                     }
                     KeyCode::Char('t') => {
-                        let _ = app.test_latency().await;
+                        app.trigger_latency_test();
                     }
                     KeyCode::Char('s') => {
                         app.previous_focus = app.focus.clone();
@@ -254,6 +276,17 @@ async fn commit_edit(app: &mut App) -> Result<()> {
                 let _ = app.save_app_settings();
                 let _ = app.fetch_proxies().await;
                 let _ = app.fetch_config().await;
+            }
+            ConfigEntry::TestUrl => {
+                app.app_settings.test_url = app.editing_value.clone();
+                let _ = app.save_app_settings();
+                app.trigger_latency_test();
+            }
+            ConfigEntry::TestTimeout => {
+                if let Ok(timeout) = app.editing_value.parse::<u64>() {
+                    app.app_settings.test_timeout = timeout;
+                    let _ = app.save_app_settings();
+                }
             }
             _ => {}
         }
