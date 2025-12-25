@@ -61,7 +61,7 @@ proxy-providers:
     type: http
     url: "https://www.example.com"
     interval: 3600
-    path: ./proxies/glados.yaml
+    path: ./proxies/myproxies.yaml
     health-check:
       enable: true
       interval: 3600
