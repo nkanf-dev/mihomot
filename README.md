@@ -14,6 +14,72 @@ cargo install --path .
 
 Ensure Mihomo is running with external controller enabled.
 
+If you don't have a mihomo core running, you can use docker to quick start one.
+
+Here is an example `docker-compose.yml` file to start a mihomo core using tun mode. 
+
+```yaml
+services:
+  mihomo:
+    image: metacubex/mihomo:latest
+    container_name: mihomo
+    restart: always
+    network_mode: host
+    volumes:
+      - ./config.yaml:/root/.config/mihomo/config.yaml
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+```
+
+And you could edit `config.yaml` to add some proxy providers or rules.
+
+Here is also an example:
+
+```yaml
+log-level: error
+external-controller: 0.0.0.0:9090
+secret: mihomo
+mixed-port: 7890
+mode: rule
+
+tun:
+  enable: true
+  stack: system
+  auto-route: true
+  auto-detect-interface: true
+  dns-hijack: ["any:53"]
+
+dns:
+  enable: true
+  enhanced-mode: fake-ip
+  nameserver: [223.5.5.5, 119.29.29.29]
+
+proxy-providers:
+  MyProxies:
+    type: http
+    url: "https://www.example.com"
+    interval: 3600
+    path: ./proxies/glados.yaml
+    health-check:
+      enable: true
+      interval: 3600
+      url: http://www.gstatic.com/generate_204
+
+proxy-groups:
+  - name: 🚀 Proxy
+    type: select
+    use:
+      - MyProxies
+
+rules:
+  - GEOIP,CN,DIRECT
+  - MATCH,🚀 Proxy
+```
+
+To run mihomot, just type this command to open the tui if you have installed.
+
 ```bash
 mihomot
 ```
@@ -26,7 +92,9 @@ Default configuration:
 ```json
 {
   "base_url": "http://127.0.0.1:9090",
-  "api_secret": "mihomo"
+  "api_secret": "mihomo",
+  "test_url": "https://www.google.com",
+  "test_timeout": 3000
 }
 ```
 
