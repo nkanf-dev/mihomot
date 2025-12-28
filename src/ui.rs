@@ -3,7 +3,9 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, Gauge, List, ListItem, Paragraph, Row, Table, Wrap},
+    widgets::{
+        Block, Borders, Cell, Clear, Gauge, List, ListItem, Paragraph, Row, Sparkline, Table, Wrap,
+    },
 };
 
 use crate::app::{App, ConfigEntry, Focus};
@@ -143,7 +145,7 @@ fn draw_overview(f: &mut Frame, app: &App, area: Rect) {
         .constraints([
             Constraint::Length(6), // Info
             Constraint::Length(3), // Google Test
-            Constraint::Min(0),    // Placeholder for Charts
+            Constraint::Min(0),    // Charts
         ])
         .margin(1)
         .split(inner_area);
@@ -215,11 +217,65 @@ fn draw_overview(f: &mut Frame, app: &App, area: Rect) {
 
     f.render_widget(gauge, chunks[1]);
 
-    // 3. Charts Placeholder
-    let chart_placeholder = Paragraph::new("Charts / Traffic (Coming Soon)")
-        .style(Style::default().fg(Color::DarkGray))
-        .block(Block::default().borders(Borders::TOP));
-    f.render_widget(chart_placeholder, chunks[2]);
+    // 3. Charts (Sparklines)
+    let chart_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(chunks[2]);
+
+    let width = chart_chunks[0].width.saturating_sub(2) as usize;
+
+    // Download
+    let down_speed = format_speed(app.current_down);
+    let down_title = format!("Download: {}/s", down_speed);
+    let down_data: Vec<u64> = app
+        .traffic_history_down
+        .iter()
+        .rev()
+        .take(width)
+        .rev()
+        .cloned()
+        .collect();
+    let down_sparkline = Sparkline::default()
+        .block(
+            Block::default()
+                .title(down_title)
+                .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT),
+        )
+        .data(&down_data)
+        .style(Style::default().fg(Color::Green));
+    f.render_widget(down_sparkline, chart_chunks[0]);
+
+    // Upload
+    let up_speed = format_speed(app.current_up);
+    let up_title = format!("Upload: {}/s", up_speed);
+    let up_data: Vec<u64> = app
+        .traffic_history_up
+        .iter()
+        .rev()
+        .take(width)
+        .rev()
+        .cloned()
+        .collect();
+    let up_sparkline = Sparkline::default()
+        .block(
+            Block::default()
+                .title(up_title)
+                .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT),
+        )
+        .data(&up_data)
+        .style(Style::default().fg(Color::Yellow));
+    f.render_widget(up_sparkline, chart_chunks[1]);
+}
+
+fn format_speed(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
 }
 
 fn draw_settings(f: &mut Frame, app: &mut App) {

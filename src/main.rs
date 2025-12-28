@@ -45,6 +45,11 @@ async fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
             app.latency_status = status;
         }
 
+        // Check for traffic updates
+        while let Ok(traffic) = app.traffic_rx.try_recv() {
+            app.on_traffic(traffic);
+        }
+
         if event::poll(std::time::Duration::from_millis(100))?
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press

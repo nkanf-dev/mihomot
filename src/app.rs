@@ -1,12 +1,19 @@
 use anyhow::Result;
+use futures_util::StreamExt;
 use ratatui::widgets::{ListState, TableState};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::mpsc;
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct Traffic {
+    pub up: u64,
+    pub down: u64,
+}
 
 #[derive(Debug, Deserialize, Clone)]
 #[allow(dead_code)]
@@ -103,12 +110,10 @@ pub enum Focus {
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum ConfigEntry {
-    // App Settings
     BaseUrl,
     ApiSecret,
     TestUrl,
     TestTimeout,
-    // Mihomo Config
     Mode,
     Tun,
     MixedPort,
@@ -125,11 +130,17 @@ pub struct App {
     pub client: Client,
     pub app_settings: AppSettings,
 
-    // Async Task Communication
     pub latency_tx: mpsc::Sender<LatencyStatus>,
     pub latency_rx: mpsc::Receiver<LatencyStatus>,
 
-    // UI State
+    pub traffic_tx: mpsc::Sender<Traffic>,
+    pub traffic_rx: mpsc::Receiver<Traffic>,
+
+    pub traffic_history_up: VecDeque<u64>,
+    pub traffic_history_down: VecDeque<u64>,
+    pub current_up: u64,
+    pub current_down: u64,
+
     pub group_names: Vec<String>,
     pub group_state: ListState,
     pub proxy_state: ListState,
@@ -138,7 +149,6 @@ pub struct App {
     pub show_info_popup: bool,
     pub popup_scroll: u16,
 
-    // Settings State
     pub settings_items: Vec<ConfigEntry>,
     pub settings_state: TableState,
     pub is_editing: bool,
@@ -173,8 +183,9 @@ impl App {
 
         let app_settings = Self::load_app_settings();
         let (latency_tx, latency_rx) = mpsc::channel(10);
+        let (traffic_tx, traffic_rx) = mpsc::channel(100);
 
-        Self {
+        let app = Self {
             proxies: HashMap::new(),
             config: None,
             latency_status: LatencyStatus::Pending,
@@ -182,6 +193,12 @@ impl App {
             app_settings,
             latency_tx,
             latency_rx,
+            traffic_tx,
+            traffic_rx,
+            traffic_history_up: VecDeque::from(vec![0; 1000]),
+            traffic_history_down: VecDeque::from(vec![0; 1000]),
+            current_up: 0,
+            current_down: 0,
             group_names: Vec::new(),
             group_state,
             proxy_state,
@@ -194,7 +211,62 @@ impl App {
             is_editing: false,
             editing_value: String::new(),
             error: None,
-        }
+        };
+
+        app.start_traffic_monitor();
+        app
+    }
+
+    fn start_traffic_monitor(&self) {
+        let client = self.client.clone();
+        let base_url = self.app_settings.base_url.clone();
+        let secret = self.app_settings.api_secret.clone();
+        let tx = self.traffic_tx.clone();
+
+        tokio::spawn(async move {
+            let url = format!("{}/traffic", base_url);
+            loop {
+                let mut request = client.get(&url);
+                if !secret.is_empty() {
+                    request = request.bearer_auth(&secret);
+                }
+
+                if let Ok(resp) = request.send().await
+                    && resp.status().is_success()
+                {
+                    let mut stream = resp.bytes_stream();
+                    let mut buffer = String::new();
+
+                    while let Some(Ok(bytes)) = stream.next().await {
+                        if let Ok(text) = std::str::from_utf8(&bytes) {
+                            buffer.push_str(text);
+                            while let Some(pos) = buffer.find('\n') {
+                                let line = buffer[..pos].to_string();
+                                buffer = buffer[pos + 1..].to_string();
+
+                                if let Ok(traffic) = serde_json::from_str::<Traffic>(&line)
+                                    && tx.send(traffic).await.is_err()
+                                {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            }
+        });
+    }
+
+    pub fn on_traffic(&mut self, traffic: Traffic) {
+        self.current_up = traffic.up;
+        self.current_down = traffic.down;
+
+        self.traffic_history_up.pop_front();
+        self.traffic_history_up.push_back(traffic.up);
+
+        self.traffic_history_down.pop_front();
+        self.traffic_history_down.push_back(traffic.down);
     }
 
     fn get_config_path() -> Option<PathBuf> {
