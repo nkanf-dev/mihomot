@@ -162,7 +162,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new() -> Self {
+    pub fn new(url_override: Option<String>, secret_override: Option<String>) -> Self {
         let mut group_state = ListState::default();
         let mut proxy_state = TableState::default();
         group_state.select(Some(0));
@@ -185,7 +185,14 @@ impl App {
             ConfigEntry::Ipv6,
         ];
 
-        let app_settings = Self::load_app_settings();
+        let mut app_settings = Self::load_app_settings();
+        if let Some(url) = url_override {
+            app_settings.base_url = url;
+        }
+        if let Some(secret) = secret_override {
+            app_settings.api_secret = secret;
+        }
+
         let (real_latency_tx, real_latency_rx) = mpsc::channel(10);
         let (traffic_tx, traffic_rx) = mpsc::channel(100);
         let (proxy_test_tx, proxy_test_rx) = mpsc::channel(100);

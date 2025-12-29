@@ -1,4 +1,5 @@
 use anyhow::Result;
+use clap::Parser;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
@@ -12,8 +13,22 @@ mod ui;
 
 use app::{App, ConfigEntry, Focus};
 
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// Temporary API URL to use
+    #[arg(short = 'U', long)]
+    url: Option<String>,
+
+    /// Temporary API Secret to use
+    #[arg(short = 'S', long)]
+    secret: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    let args = Args::parse();
+
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = stdout();
@@ -21,7 +36,7 @@ async fn main() -> Result<()> {
     let mut terminal = ratatui::init();
 
     // Create app and fetch initial data
-    let mut app = App::new();
+    let mut app = App::new(args.url, args.secret);
     let _ = app.fetch_proxies().await;
     let _ = app.fetch_config().await;
     app.trigger_latency_test();
