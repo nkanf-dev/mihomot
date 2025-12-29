@@ -84,6 +84,20 @@ To run mihomot, just type this command to open the tui if you have installed.
 mihomot
 ```
 
+## CLI Options
+
+You can override the default connection settings using command-line arguments:
+
+- `-U, --url <URL>`: Temporary API URL (e.g., `http://192.168.1.5:9090`)
+- `-S, --secret <SECRET>`: Temporary API Secret
+- `--version`: Show version information
+- `--help`: Show help message
+
+Example:
+```bash
+mihomot -U http://192.168.1.100:9090 -S mysecret
+```
+
 ## Configuration
 
 App settings are stored in `~/.config/mihomot/settings.json`.
