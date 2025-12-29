@@ -94,7 +94,7 @@ impl Default for AppSettings {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-pub enum LatencyStatus {
+pub enum RealLatencyStatus {
     Pending,
     Testing,
     Success(u64),
@@ -126,12 +126,16 @@ pub enum ConfigEntry {
 pub struct App {
     pub proxies: HashMap<String, ProxyItem>,
     pub config: Option<Config>,
-    pub latency_status: LatencyStatus,
+    pub real_latency_status: RealLatencyStatus,
     pub client: Client,
     pub app_settings: AppSettings,
 
-    pub latency_tx: mpsc::Sender<LatencyStatus>,
-    pub latency_rx: mpsc::Receiver<LatencyStatus>,
+    pub real_latency_tx: mpsc::Sender<RealLatencyStatus>,
+    pub real_latency_rx: mpsc::Receiver<RealLatencyStatus>,
+
+    pub proxy_latency: HashMap<String, Option<u64>>,
+    pub proxy_test_tx: mpsc::Sender<(String, u64)>,
+    pub proxy_test_rx: mpsc::Receiver<(String, u64)>,
 
     pub traffic_tx: mpsc::Sender<Traffic>,
     pub traffic_rx: mpsc::Receiver<Traffic>,
@@ -143,7 +147,7 @@ pub struct App {
 
     pub group_names: Vec<String>,
     pub group_state: ListState,
-    pub proxy_state: ListState,
+    pub proxy_state: TableState,
     pub focus: Focus,
     pub previous_focus: Focus,
     pub show_info_popup: bool,
@@ -160,7 +164,7 @@ pub struct App {
 impl App {
     pub fn new() -> Self {
         let mut group_state = ListState::default();
-        let mut proxy_state = ListState::default();
+        let mut proxy_state = TableState::default();
         group_state.select(Some(0));
         proxy_state.select(Some(0));
 
@@ -182,17 +186,21 @@ impl App {
         ];
 
         let app_settings = Self::load_app_settings();
-        let (latency_tx, latency_rx) = mpsc::channel(10);
+        let (real_latency_tx, real_latency_rx) = mpsc::channel(10);
         let (traffic_tx, traffic_rx) = mpsc::channel(100);
+        let (proxy_test_tx, proxy_test_rx) = mpsc::channel(100);
 
         let app = Self {
             proxies: HashMap::new(),
             config: None,
-            latency_status: LatencyStatus::Pending,
+            real_latency_status: RealLatencyStatus::Pending,
             client: Client::builder().build().unwrap_or_default(),
             app_settings,
-            latency_tx,
-            latency_rx,
+            real_latency_tx,
+            real_latency_rx,
+            proxy_latency: HashMap::new(),
+            proxy_test_tx,
+            proxy_test_rx,
             traffic_tx,
             traffic_rx,
             traffic_history_up: VecDeque::from(vec![0; 1000]),
@@ -364,6 +372,19 @@ impl App {
                     match resp.json::<ProxiesResponse>().await {
                         Ok(data) => {
                             self.proxies = data.proxies;
+
+                            // Populate latency from history
+                            for (name, item) in &self.proxies {
+                                if let Some(history) =
+                                    item.extra.get("history").and_then(|h| h.as_array())
+                                    && let Some(last) = history.last()
+                                    && let Some(delay) = last.get("delay").and_then(|d| d.as_u64())
+                                    && delay > 0
+                                {
+                                    self.proxy_latency.insert(name.clone(), Some(delay));
+                                }
+                            }
+
                             self.group_names = self
                                 .proxies
                                 .values()
@@ -401,9 +422,9 @@ impl App {
         let client = self.client.clone();
         let url = self.app_settings.test_url.clone();
         let timeout = self.app_settings.test_timeout;
-        let tx = self.latency_tx.clone();
+        let tx = self.real_latency_tx.clone();
 
-        self.latency_status = LatencyStatus::Testing;
+        self.real_latency_status = RealLatencyStatus::Testing;
 
         tokio::spawn(async move {
             use std::time::Instant;
@@ -418,10 +439,13 @@ impl App {
                 Ok(resp) => {
                     if resp.status().is_success() || resp.status().is_redirection() {
                         let delay = start.elapsed().as_millis() as u64;
-                        let _ = tx.send(LatencyStatus::Success(delay)).await;
+                        let _ = tx.send(RealLatencyStatus::Success(delay)).await;
                     } else {
                         let _ = tx
-                            .send(LatencyStatus::Failed(format!("Status: {}", resp.status())))
+                            .send(RealLatencyStatus::Failed(format!(
+                                "Status: {}",
+                                resp.status()
+                            )))
                             .await;
                     }
                 }
@@ -433,10 +457,53 @@ impl App {
                     } else {
                         "Error".to_string()
                     };
-                    let _ = tx.send(LatencyStatus::Failed(msg)).await;
+                    let _ = tx.send(RealLatencyStatus::Failed(msg)).await;
                 }
             }
         });
+    }
+
+    pub fn trigger_group_latency_test(&self) {
+        if let Some(group_name) = self.get_selected_group_name()
+            && let Some(group) = self.proxies.get(group_name)
+            && let Some(all) = &group.all
+        {
+            let base_url = self.app_settings.base_url.clone();
+            let secret = self.app_settings.api_secret.clone();
+            let test_url = self.app_settings.test_url.clone();
+            let timeout = self.app_settings.test_timeout;
+            let tx = self.proxy_test_tx.clone();
+            let client = self.client.clone();
+
+            for proxy_name in all {
+                let p_name = proxy_name.clone();
+                let my_url = format!(
+                    "{}/proxies/{}/delay?url={}&timeout={}",
+                    base_url,
+                    urlencoding::encode(&p_name),
+                    urlencoding::encode(&test_url),
+                    timeout
+                );
+                let my_client = client.clone();
+                let my_secret = secret.clone();
+                let my_tx = tx.clone();
+
+                tokio::spawn(async move {
+                    let mut req = my_client.get(&my_url);
+                    if !my_secret.is_empty() {
+                        req = req.bearer_auth(&my_secret);
+                    }
+
+                    if let Ok(resp) = req.send().await
+                        && resp.status().is_success()
+                        && let Ok(json) = resp.json::<serde_json::Value>().await
+                        && let Some(delay) = json.get("delay").and_then(|v| v.as_u64())
+                    {
+                        let _ = my_tx.send((p_name, delay)).await;
+                    }
+                });
+            }
+        }
     }
 
     pub async fn select_proxy(&self, group_name: &str, proxy_name: &str) -> Result<()> {

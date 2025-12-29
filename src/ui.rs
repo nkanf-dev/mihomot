@@ -97,7 +97,7 @@ fn draw_proxies(f: &mut Frame, app: &mut App, area: Rect) {
     if let Some(group_name) = group_name_opt {
         if let Some(group) = app.proxies.get(&group_name) {
             if let Some(all) = &group.all {
-                let items: Vec<ListItem> = all
+                let rows: Vec<Row> = all
                     .iter()
                     .map(|name| {
                         let mut style = Style::default();
@@ -106,20 +106,40 @@ fn draw_proxies(f: &mut Frame, app: &mut App, area: Rect) {
                         {
                             style = style.fg(Color::Green);
                         }
-                        ListItem::new(Line::from(name.as_str())).style(style)
+
+                        // Latency
+                        let latency = app.proxy_latency.get(name).copied().flatten();
+                        let (lat_str, lat_style) = if let Some(ms) = latency {
+                            let s = format!("{} ms", ms);
+                            let c = if ms < 200 {
+                                Color::Green
+                            } else if ms < 500 {
+                                Color::Yellow
+                            } else {
+                                Color::Red
+                            };
+                            (s, Style::default().fg(c))
+                        } else {
+                            ("-".to_string(), Style::default().fg(Color::Gray))
+                        };
+
+                        Row::new(vec![
+                            Cell::from(name.as_str()).style(style),
+                            Cell::from(lat_str).style(lat_style),
+                        ])
                     })
                     .collect();
 
-                let list = List::new(items)
+                let table = Table::new(rows, [Constraint::Percentage(70), Constraint::Length(10)])
                     .block(block)
-                    .highlight_style(
+                    .row_highlight_style(
                         Style::default()
                             .add_modifier(Modifier::BOLD)
                             .bg(Color::DarkGray),
                     )
                     .highlight_symbol(">> ");
 
-                f.render_stateful_widget(list, area, &mut app.proxy_state);
+                f.render_stateful_widget(table, area, &mut app.proxy_state);
             } else {
                 f.render_widget(
                     Paragraph::new("No proxies in this group").block(block),
@@ -189,10 +209,10 @@ fn draw_overview(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(info_text), chunks[0]);
 
     // 2. Connection Test (Latency)
-    let (latency_label, latency_color, percent) = match &app.latency_status {
-        crate::app::LatencyStatus::Pending => ("Idle".to_string(), Color::Gray, 0),
-        crate::app::LatencyStatus::Testing => ("Testing...".to_string(), Color::Yellow, 0),
-        crate::app::LatencyStatus::Success(ms) => {
+    let (latency_label, latency_color, percent) = match &app.real_latency_status {
+        crate::app::RealLatencyStatus::Pending => ("Idle".to_string(), Color::Gray, 0),
+        crate::app::RealLatencyStatus::Testing => ("Testing...".to_string(), Color::Yellow, 0),
+        crate::app::RealLatencyStatus::Success(ms) => {
             let color = if *ms < 200 {
                 Color::Green
             } else if *ms < 500 {
@@ -206,7 +226,7 @@ fn draw_overview(f: &mut Frame, app: &App, area: Rect) {
                 (1000.0 / (*ms as f64).max(10.0) * 100.0).min(100.0) as u16,
             )
         }
-        crate::app::LatencyStatus::Failed(msg) => (format!("Err: {}", msg), Color::Red, 100),
+        crate::app::RealLatencyStatus::Failed(msg) => (format!("Err: {}", msg), Color::Red, 100),
     };
 
     let gauge = Gauge::default()

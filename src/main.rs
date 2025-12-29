@@ -40,9 +40,14 @@ async fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
     loop {
         terminal.draw(|f| ui::draw(f, app))?;
 
-        // Check for latency updates
-        if let Ok(status) = app.latency_rx.try_recv() {
-            app.latency_status = status;
+        // Check for real latency updates
+        if let Ok(status) = app.real_latency_rx.try_recv() {
+            app.real_latency_status = status;
+        }
+
+        // Check for proxy latency updates
+        while let Ok((name, latency)) = app.proxy_test_rx.try_recv() {
+            app.proxy_latency.insert(name, Some(latency));
         }
 
         // Check for traffic updates
@@ -159,6 +164,9 @@ async fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                 match key.code {
                     KeyCode::Char('q') => return Ok(()),
                     KeyCode::Char('r') => {
+                        if let Focus::Proxies = app.focus {
+                            app.trigger_group_latency_test();
+                        }
                         let _ = app.fetch_proxies().await;
                         let _ = app.fetch_config().await;
                     }
