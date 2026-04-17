@@ -1,12 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
-use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::DefaultTerminal;
-use std::io::stdout;
 
 mod app;
 mod ui;
@@ -29,10 +24,6 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Setup terminal
-    enable_raw_mode()?;
-    let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen)?;
     let mut terminal = ratatui::init();
 
     // Create app and fetch initial data
@@ -45,8 +36,6 @@ async fn main() -> Result<()> {
 
     // Restore terminal
     ratatui::restore();
-    execute!(stdout, LeaveAlternateScreen)?;
-    disable_raw_mode()?;
 
     app_result
 }
@@ -80,7 +69,11 @@ async fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                         app.is_editing = false;
                     }
                     KeyCode::Enter => {
-                        let _ = commit_edit(app).await;
+                        if let Err(err) = commit_edit(app).await {
+                            app.error = Some(err.to_string());
+                        } else {
+                            app.error = None;
+                        }
                         app.is_editing = false;
                     }
                     KeyCode::Backspace => {
@@ -168,7 +161,11 @@ async fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                                     }
                                 }
                                 _ => {
-                                    let _ = handle_setting_change(app, entry).await;
+                                    if let Err(err) = handle_setting_change(app, entry).await {
+                                        app.error = Some(err.to_string());
+                                    } else {
+                                        app.error = None;
+                                    }
                                 }
                             }
                         }
@@ -220,8 +217,13 @@ async fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                             {
                                 let g_name = group_name.clone();
                                 let p_name = proxy_name.clone();
-                                let _ = app.select_proxy(&g_name, &p_name).await;
-                                let _ = app.fetch_proxies().await;
+                                match app.select_proxy(&g_name, &p_name).await {
+                                    Ok(()) => {
+                                        let _ = app.fetch_proxies().await;
+                                        app.error = None;
+                                    }
+                                    Err(err) => app.error = Some(err.to_string()),
+                                }
                             }
                         } else {
                             app.focus = Focus::Proxies;
@@ -295,25 +297,27 @@ async fn commit_edit(app: &mut App) -> Result<()> {
             }
             ConfigEntry::BaseUrl => {
                 app.app_settings.base_url = app.editing_value.clone();
-                let _ = app.save_app_settings();
+                app.save_app_settings()?;
+                app.restart_traffic_monitor();
                 let _ = app.fetch_proxies().await;
                 let _ = app.fetch_config().await;
             }
             ConfigEntry::ApiSecret => {
                 app.app_settings.api_secret = app.editing_value.clone();
-                let _ = app.save_app_settings();
+                app.save_app_settings()?;
+                app.restart_traffic_monitor();
                 let _ = app.fetch_proxies().await;
                 let _ = app.fetch_config().await;
             }
             ConfigEntry::TestUrl => {
                 app.app_settings.test_url = app.editing_value.clone();
-                let _ = app.save_app_settings();
+                app.save_app_settings()?;
                 app.trigger_latency_test();
             }
             ConfigEntry::TestTimeout => {
                 if let Ok(timeout) = app.editing_value.parse::<u64>() {
                     app.app_settings.test_timeout = timeout;
-                    let _ = app.save_app_settings();
+                    app.save_app_settings()?;
                 }
             }
             _ => {}

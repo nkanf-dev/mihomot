@@ -8,6 +8,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Traffic {
@@ -159,6 +160,7 @@ pub struct App {
     pub editing_value: String,
 
     pub error: Option<String>,
+    traffic_monitor_task: Option<JoinHandle<()>>,
 }
 
 impl App {
@@ -197,7 +199,7 @@ impl App {
         let (traffic_tx, traffic_rx) = mpsc::channel(100);
         let (proxy_test_tx, proxy_test_rx) = mpsc::channel(100);
 
-        let app = Self {
+        let mut app = Self {
             proxies: HashMap::new(),
             config: None,
             real_latency_status: RealLatencyStatus::Pending,
@@ -226,13 +228,14 @@ impl App {
             is_editing: false,
             editing_value: String::new(),
             error: None,
+            traffic_monitor_task: None,
         };
 
-        app.start_traffic_monitor();
+        app.restart_traffic_monitor();
         app
     }
 
-    fn start_traffic_monitor(&self) {
+    fn start_traffic_monitor(&self) -> JoinHandle<()> {
         let client = self.client.clone();
         let base_url = self.app_settings.base_url.clone();
         let secret = self.app_settings.api_secret.clone();
@@ -270,7 +273,14 @@ impl App {
                 }
                 tokio::time::sleep(Duration::from_secs(3)).await;
             }
-        });
+        })
+    }
+
+    pub fn restart_traffic_monitor(&mut self) {
+        if let Some(task) = self.traffic_monitor_task.take() {
+            task.abort();
+        }
+        self.traffic_monitor_task = Some(self.start_traffic_monitor());
     }
 
     pub fn on_traffic(&mut self, traffic: Traffic) {
@@ -359,7 +369,7 @@ impl App {
             request = request.bearer_auth(&self.app_settings.api_secret);
         }
 
-        request.send().await?;
+        request.send().await?.error_for_status()?;
         // Fetch updated config to sync UI
         self.fetch_config().await?;
         Ok(())
@@ -399,6 +409,29 @@ impl App {
                                 .filter_map(|p| p.name.clone())
                                 .collect();
                             self.group_names.sort();
+                            if self.group_names.is_empty() {
+                                self.group_state.select(None);
+                                self.proxy_state.select(None);
+                            } else {
+                                let group_idx = self
+                                    .group_state
+                                    .selected()
+                                    .filter(|&idx| idx < self.group_names.len())
+                                    .unwrap_or(0);
+                                self.group_state.select(Some(group_idx));
+
+                                let proxy_len = self
+                                    .group_names
+                                    .get(group_idx)
+                                    .and_then(|group_name| self.proxies.get(group_name))
+                                    .and_then(|group| group.all.as_ref())
+                                    .map_or(0, Vec::len);
+
+                                let proxy_idx =
+                                    self.proxy_state.selected().filter(|&idx| idx < proxy_len);
+                                self.proxy_state
+                                    .select(proxy_idx.or(Some(0)).filter(|_| proxy_len > 0));
+                            }
                             self.error = None;
                         }
                         Err(e) => self.error = Some(format!("Failed to parse JSON: {}", e)),
@@ -522,12 +555,18 @@ impl App {
             request = request.bearer_auth(&self.app_settings.api_secret);
         }
 
-        request.send().await?;
+        request.send().await?.error_for_status()?;
         Ok(())
     }
 
     // Navigation Helpers
     pub fn next_group(&mut self) {
+        if self.group_names.is_empty() {
+            self.group_state.select(None);
+            self.proxy_state.select(None);
+            return;
+        }
+
         let i = match self.group_state.selected() {
             Some(i) => {
                 if i >= self.group_names.len() - 1 {
@@ -543,6 +582,12 @@ impl App {
     }
 
     pub fn previous_group(&mut self) {
+        if self.group_names.is_empty() {
+            self.group_state.select(None);
+            self.proxy_state.select(None);
+            return;
+        }
+
         let i = match self.group_state.selected() {
             Some(i) => {
                 if i == 0 {
@@ -563,6 +608,11 @@ impl App {
             && let Some(group) = self.proxies.get(group_name)
             && let Some(all) = &group.all
         {
+            if all.is_empty() {
+                self.proxy_state.select(None);
+                return;
+            }
+
             let i = match self.proxy_state.selected() {
                 Some(i) => {
                     if i >= all.len() - 1 {
@@ -583,6 +633,11 @@ impl App {
             && let Some(group) = self.proxies.get(group_name)
             && let Some(all) = &group.all
         {
+            if all.is_empty() {
+                self.proxy_state.select(None);
+                return;
+            }
+
             let i = match self.proxy_state.selected() {
                 Some(i) => {
                     if i == 0 {
@@ -614,5 +669,112 @@ impl App {
                 .and_then(|i| all.get(i).cloned());
         }
         None
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        if let Some(task) = self.traffic_monitor_task.take() {
+            task.abort();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    fn make_selector_group(name: &str, proxies: Vec<&str>) -> ProxyItem {
+        ProxyItem {
+            name: Some(name.to_string()),
+            proxy_type: Some("Selector".to_string()),
+            now: proxies.first().map(|value| (*value).to_string()),
+            all: Some(proxies.into_iter().map(str::to_string).collect()),
+            extra: serde_json::Map::new(),
+        }
+    }
+
+    async fn spawn_status_server(status_line: &'static str) -> Result<String> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buffer = [0_u8; 1024];
+                let _ = stream.read(&mut buffer).await;
+                let response = format!("{status_line}\r\nContent-Length: 0\r\n\r\n");
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+
+        Ok(format!("http://{addr}"))
+    }
+
+    #[tokio::test]
+    async fn navigation_handles_empty_lists_without_panicking() {
+        let mut app = App::new(None, None);
+        app.group_names.clear();
+        app.group_state.select(Some(0));
+        app.proxy_state.select(Some(0));
+
+        app.next_group();
+        app.previous_group();
+        app.next_proxy();
+        app.previous_proxy();
+
+        assert_eq!(app.group_state.selected(), None);
+        assert_eq!(app.proxy_state.selected(), None);
+    }
+
+    #[tokio::test]
+    async fn navigation_handles_empty_proxy_groups_without_panicking() {
+        let mut app = App::new(None, None);
+        app.group_names = vec!["Group".to_string()];
+        app.group_state.select(Some(0));
+        app.proxy_state.select(Some(0));
+        app.proxies.insert(
+            "Group".to_string(),
+            make_selector_group("Group", Vec::new()),
+        );
+
+        app.next_proxy();
+        app.previous_proxy();
+
+        assert_eq!(app.proxy_state.selected(), None);
+    }
+
+    #[tokio::test]
+    async fn update_config_returns_error_for_http_failures() {
+        let server_url = spawn_status_server("HTTP/1.1 500 Internal Server Error")
+            .await
+            .expect("server should start");
+        let mut app = App::new(None, None);
+        app.app_settings.base_url = server_url;
+        app.app_settings.api_secret.clear();
+        app.restart_traffic_monitor();
+
+        let result = app
+            .update_config(serde_json::json!({ "mode": "rule" }))
+            .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn select_proxy_returns_error_for_http_failures() {
+        let server_url = spawn_status_server("HTTP/1.1 401 Unauthorized")
+            .await
+            .expect("server should start");
+        let mut app = App::new(None, None);
+        app.app_settings.base_url = server_url;
+        app.app_settings.api_secret.clear();
+        app.restart_traffic_monitor();
+
+        let result = app.select_proxy("Group", "Proxy").await;
+
+        assert!(result.is_err());
     }
 }
