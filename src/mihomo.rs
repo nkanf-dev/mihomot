@@ -81,8 +81,7 @@ pub fn start(runtime: &RuntimeMode, config_path: &Path) -> Result<()> {
                 let config_dir = config_path
                     .parent()
                     .unwrap_or(Path::new("."))
-                    .to_string_lossy()
-                    .to_string();
+                    .to_string_lossy();
                 Command::new("docker")
                     .args([
                         "run", "-d",
@@ -100,9 +99,11 @@ pub fn start(runtime: &RuntimeMode, config_path: &Path) -> Result<()> {
             }
         }
         RuntimeMode::Binary { path } => {
+            // Use status() to wait for process to be ready, then detach
+            // mihomo daemonizes itself with -d flag, so status() returns once it forks
             Command::new(path)
                 .args(["-d", config_path.parent().unwrap_or(Path::new(".")).to_str().unwrap_or(".")])
-                .spawn()
+                .status()
                 .context("Failed to start mihomo binary")?;
         }
     }
@@ -167,7 +168,12 @@ fn local_binary_path() -> PathBuf {
 
 /// Ensure mihomo is available. Tries detection first, then auto-installs.
 /// Returns the runtime mode.
-pub async fn ensure_mihomo(_config_path: &Path) -> Result<RuntimeMode> {
+pub async fn ensure_mihomo(config_path: &Path) -> Result<RuntimeMode> {
+    // Ensure config directory exists for binary placement
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+
     // Already available?
     if let Ok(runtime) = detect_runtime() {
         return Ok(runtime);
@@ -213,23 +219,14 @@ async fn download_binary(dest: &Path) -> Result<()> {
     let filename = format!("mihomo-{}-{}", os, arch);
 
     // Build download URLs in priority order
-    let mut urls = Vec::new();
+    let gh_url = format!("{}/{}", GITHUB_RELEASE_URL, filename);
+    let proxy_url = format!("{}{}", GHPROXY_PREFIX, gh_url);
 
-    // Check if likely CN (fast heuristic: try ghproxy first)
-    if is_likely_cn() {
-        urls.push(format!("{}/{}", GITHUB_RELEASE_URL, filename));
-        urls = vec![format!(
-            "{}{}/{}",
-            GHPROXY_PREFIX, GITHUB_RELEASE_URL, filename
-        )];
-        urls.push(format!("{}/{}", GITHUB_RELEASE_URL, filename));
+    let urls = if is_likely_cn() {
+        vec![proxy_url, gh_url]
     } else {
-        urls.push(format!("{}/{}", GITHUB_RELEASE_URL, filename));
-        urls.push(format!(
-            "{}{}/{}",
-            GHPROXY_PREFIX, GITHUB_RELEASE_URL, filename
-        ));
-    }
+        vec![gh_url, proxy_url]
+    };
 
     fs_create_dir_all(dest)?;
 
@@ -295,7 +292,7 @@ fn is_likely_cn() -> bool {
 
     // Check timezone
     if let Ok(tz) = std::env::var("TZ") {
-        if tz.contains("Asia/Shanghai") || tz.contains("Asia/Chongqing") || tz.contains("PRC") {
+        if tz.contains("Shanghai") || tz.contains("Chongqing") || tz.contains("PRC") {
             return true;
         }
     }
