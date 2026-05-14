@@ -33,14 +33,14 @@ pub fn detect_runtime() -> Result<RuntimeMode> {
     }
 
     // 3. Check if mihomo is in PATH
-    if let Ok(output) = Command::new("which").arg("mihomo").output() {
-        if output.status.success() {
-            let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path_str.is_empty() {
-                return Ok(RuntimeMode::Binary {
-                    path: PathBuf::from(path_str),
-                });
-            }
+    if let Ok(output) = Command::new("which").arg("mihomo").output()
+        && output.status.success()
+    {
+        let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path_str.is_empty() {
+            return Ok(RuntimeMode::Binary {
+                path: PathBuf::from(path_str),
+            });
         }
     }
 
@@ -187,13 +187,13 @@ pub async fn ensure_mihomo(config_path: &Path) -> Result<RuntimeMode> {
         let status = Command::new("docker")
             .args(["pull", "metacubex/mihomo:latest"])
             .status();
-        if let Ok(s) = status {
-            if s.success() {
-                println!("Docker image pulled successfully.");
-                return Ok(RuntimeMode::Docker {
-                    container_name: "mihomo".to_string(),
-                });
-            }
+        if let Ok(s) = status
+            && s.success()
+        {
+            println!("Docker image pulled successfully.");
+            return Ok(RuntimeMode::Docker {
+                container_name: "mihomo".to_string(),
+            });
         }
         eprintln!("Docker pull failed, falling back to binary download...");
     }
@@ -291,17 +291,17 @@ fn is_likely_cn() -> bool {
     }
 
     // Check timezone
-    if let Ok(tz) = std::env::var("TZ") {
-        if tz.contains("Shanghai") || tz.contains("Chongqing") || tz.contains("PRC") {
-            return true;
-        }
+    if let Ok(tz) = std::env::var("TZ")
+        && (tz.contains("Shanghai") || tz.contains("Chongqing") || tz.contains("PRC"))
+    {
+        return true;
     }
 
     // Check locale
-    if let Ok(lang) = std::env::var("LANG") {
-        if lang.starts_with("zh_CN") {
-            return true;
-        }
+    if let Ok(lang) = std::env::var("LANG")
+        && lang.starts_with("zh_CN")
+    {
+        return true;
     }
 
     false
