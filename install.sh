@@ -6,6 +6,7 @@ BIN_NAME="mihomot"
 INSTALL_DIR="${MIHOMOT_INSTALL_DIR:-/usr/local/bin}"
 CONFIG_PATH="${MIHOMOT_CONFIG:-/etc/mihomo/config.yaml}"
 SERVICE_NAME="${MIHOMOT_SERVICE_NAME:-mihomot}"
+DETECTED_REGION="${MIHOMOT_REGION:-}"
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -132,6 +133,9 @@ download_first() {
     info "downloading: $url"
 
     if curl -fL --retry 2 --connect-timeout 10 --max-time 300 -o "$output" "$url"; then
+      if [ -n "$prefix" ] && [ -z "${MIHOMOT_REGION:-}" ]; then
+        DETECTED_REGION="cn"
+      fi
       return
     fi
 
@@ -191,13 +195,34 @@ proxy-groups:
       - DIRECT
 
 rules:
-  - GEOIP,CN,DIRECT
   - MATCH,Proxy
 EOF
 
   info "creating default mihomo config: $CONFIG_PATH"
   as_root mkdir -p "$config_dir"
   as_root install -m 600 "$tmp_config" "$CONFIG_PATH"
+}
+
+fix_legacy_cn_geoip_rule() {
+  if ! is_likely_cn && [ "$DETECTED_REGION" != "cn" ]; then
+    return
+  fi
+
+  if ! as_root test -f "$CONFIG_PATH"; then
+    return
+  fi
+
+  if ! as_root grep -q '^[[:space:]]*-[[:space:]]*GEOIP,CN,DIRECT[[:space:]]*$' "$CONFIG_PATH"; then
+    return
+  fi
+
+  local backup_path
+  backup_path="${CONFIG_PATH}.bak.$(date +%Y%m%d%H%M%S)"
+
+  warn "removing GEOIP,CN,DIRECT from ${CONFIG_PATH}; it can block first start when MMDB download is unavailable"
+  as_root cp "$CONFIG_PATH" "$backup_path"
+  as_root sed -i '/^[[:space:]]*-[[:space:]]*GEOIP,CN,DIRECT[[:space:]]*$/d' "$CONFIG_PATH"
+  info "backup saved to ${backup_path}"
 }
 
 install_systemd_service() {
@@ -211,7 +236,7 @@ install_systemd_service() {
 
   service_file="$TMP_DIR/${SERVICE_NAME}.service"
   region_env=""
-  if is_likely_cn; then
+  if is_likely_cn || [ "$DETECTED_REGION" = "cn" ]; then
     region_env="Environment=MIHOMOT_REGION=cn"
   fi
 
@@ -286,6 +311,7 @@ main() {
   as_root install -m 755 "$binary_path" "${INSTALL_DIR}/${BIN_NAME}"
 
   install_default_config
+  fix_legacy_cn_geoip_rule
   install_systemd_service
 
   info "mihomot installed successfully"

@@ -13,7 +13,7 @@ curl -fsSL https://raw.githubusercontent.com/nkanf-dev/mihomot/main/install.sh |
 For mainland China networks, use the same script through a GitHub mirror:
 
 ```bash
-curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/nkanf-dev/mihomot/main/install.sh | bash
+curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/nkanf-dev/mihomot/main/install.sh | MIHOMOT_REGION=cn bash
 ```
 
 The installer downloads the latest GitHub Release binary for your Linux architecture, verifies the `.sha256` checksum, installs `mihomot` to `/usr/local/bin`, creates `/etc/mihomo/config.yaml` if missing, and starts `mihomot.service` on systemd systems. It does not compile from source.
@@ -89,7 +89,6 @@ proxy-groups:
       - MyProxies
 
 rules:
-  - GEOIP,CN,DIRECT
   - MATCH,Proxy
 ```
 
@@ -180,6 +179,8 @@ On startup, mihomot auto-detects or installs the mihomo kernel:
 
 Set `MIHOMOT_REGION=cn` to force mirror proxy.
 Set `MIHOMOT_MIHOMO_IMAGE=<image>` to force a specific mihomo Docker image.
+
+The generated default config avoids `GEOIP,CN,DIRECT` because mihomo may try to download MMDB before the proxy is ready. Add GEOIP rules later after MMDB/geodata is available.
 
 ## Multi-Server
 

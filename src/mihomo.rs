@@ -5,6 +5,7 @@ use std::process::Command;
 const GITHUB_RELEASE_URL: &str = "https://github.com/MetaCubeX/mihomo/releases/latest/download";
 const GHPROXY_PREFIX: &str = "https://gh-proxy.com/";
 const MIHOMO_IMAGE: &str = "metacubex/mihomo:latest";
+const SKILL_RAW_URL: &str = "https://raw.githubusercontent.com/nkanf-dev/mihomot/main/skill.md";
 
 #[derive(Debug)]
 pub enum RuntimeMode {
@@ -22,7 +23,7 @@ pub fn skill_install_url() -> &'static str {
     if is_likely_cn() {
         "https://gh-proxy.com/https://raw.githubusercontent.com/nkanf-dev/mihomot/main/skill.md"
     } else {
-        "https://mihomot.dev/skill.md"
+        SKILL_RAW_URL
     }
 }
 

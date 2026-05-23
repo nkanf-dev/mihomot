@@ -134,7 +134,6 @@ proxy-groups:
 rules:
   - DOMAIN-SUFFIX,google.com,Proxy
   - DOMAIN-KEYWORD,facebook,Proxy
-  - GEOIP,CN,DIRECT
   - MATCH,Proxy
 ```
 
