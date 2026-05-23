@@ -577,7 +577,7 @@ async fn run_tunnel(local_url: String, config_override: Option<String>) -> Resul
     let pid_path = state_dir.join("cloudflared.pid");
     let url_path = state_dir.join("cloudflared.url");
     let log_path = state_dir.join("cloudflared.log");
-    let secret = read_secret_for_tunnel(config_override);
+    let secret = read_secret_for_tunnel(config_override)?;
 
     if let Ok(pid_text) = fs::read_to_string(&pid_path)
         && let Ok(pid) = pid_text.trim().parse::<u32>()
@@ -686,15 +686,28 @@ fn process_is_running(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
-fn read_secret_for_tunnel(config_override: Option<String>) -> String {
+fn read_secret_for_tunnel(config_override: Option<String>) -> Result<String> {
+    let settings_secret = app::App::load_app_settings().api_secret;
+    if !settings_secret.trim().is_empty() && settings_secret != "mihomo" {
+        return Ok(settings_secret);
+    }
+
     let config_path = config_override
         .map(PathBuf::from)
         .unwrap_or_else(config::default_config_path);
-    config::read_config(&config_path)
+    let secret = config::read_config(&config_path)
         .ok()
         .and_then(|config| config.secret)
         .or_else(|| std::env::var("MIHOMO_SECRET").ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+    if secret.trim().is_empty() {
+        anyhow::bail!(
+            "mihomo secret not found. Run the install/upgrade script to write ~/.config/mihomot/settings.json, set MIHOMO_SECRET, or run with sudo -E mihomot tunnel -c /etc/mihomo/config.yaml"
+        );
+    }
+
+    Ok(secret)
 }
 
 async fn ensure_cloudflared(state_dir: &std::path::Path) -> Result<PathBuf> {
