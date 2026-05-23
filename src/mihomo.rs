@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 const GITHUB_RELEASE_URL: &str = "https://github.com/MetaCubeX/mihomo/releases/latest/download";
-const GHPROXY_PREFIX: &str = "https://gh-proxy.com/";
 const MIHOMO_IMAGE: &str = "metacubex/mihomo:latest";
 const SKILL_RAW_URL: &str = "https://raw.githubusercontent.com/nkanf-dev/mihomot/main/skill.md";
 
@@ -327,16 +327,7 @@ fn docker_image_candidates() -> Vec<String> {
 async fn download_binary(dest: &Path) -> Result<()> {
     let (os, arch) = detect_platform()?;
     let filename = format!("mihomo-{}-{}", os, arch);
-
-    // Build download URLs in priority order
     let gh_url = format!("{}/{}", GITHUB_RELEASE_URL, filename);
-    let proxy_url = format!("{}{}", GHPROXY_PREFIX, gh_url);
-
-    let urls = if is_likely_cn() {
-        vec![proxy_url, gh_url]
-    } else {
-        vec![gh_url, proxy_url]
-    };
 
     fs_create_dir_all(dest)?;
 
@@ -344,6 +335,7 @@ async fn download_binary(dest: &Path) -> Result<()> {
         .timeout(std::time::Duration::from_secs(120))
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()?;
+    let urls = ranked_github_urls(&client, &gh_url).await;
 
     let mut last_err = None;
     for url in &urls {
@@ -377,6 +369,78 @@ async fn download_binary(dest: &Path) -> Result<()> {
         last_err.unwrap_or_else(|| "unknown".to_string()),
         dest.display()
     )
+}
+
+async fn ranked_github_urls(client: &reqwest::Client, source_url: &str) -> Vec<String> {
+    let candidates = github_prefixes()
+        .into_iter()
+        .map(|prefix| proxied_url(&prefix, source_url))
+        .collect::<Vec<_>>();
+
+    let mut ranked = Vec::new();
+    for url in &candidates {
+        let started = Instant::now();
+        let reachable = client
+            .head(url)
+            .timeout(Duration::from_secs(12))
+            .send()
+            .await
+            .map(|resp| resp.status().is_success())
+            .unwrap_or(false);
+
+        if reachable {
+            let elapsed = started.elapsed();
+            println!(
+                "GitHub source reachable in {:.3}s: {}",
+                elapsed.as_secs_f64(),
+                url
+            );
+            ranked.push((elapsed, url.clone()));
+        } else {
+            eprintln!("GitHub source probe failed: {}", url);
+        }
+    }
+
+    if ranked.is_empty() {
+        return candidates;
+    }
+
+    ranked.sort_by_key(|(elapsed, _)| *elapsed);
+    ranked.into_iter().map(|(_, url)| url).collect()
+}
+
+fn github_prefixes() -> Vec<String> {
+    if let Ok(proxy) = std::env::var("MIHOMOT_GITHUB_PROXY") {
+        let proxy = proxy.trim();
+        if proxy == "direct" {
+            return vec![String::new()];
+        }
+        if !proxy.is_empty() {
+            return vec![proxy.to_string(), String::new()];
+        }
+    }
+
+    let mut prefixes = vec![
+        "https://gh-proxy.com/".to_string(),
+        "https://gh.jasonzeng.dev/".to_string(),
+        "https://ghfast.top/".to_string(),
+        "https://gh.llkk.cc/".to_string(),
+        String::new(),
+    ];
+
+    if !is_likely_cn() {
+        prefixes.rotate_right(1);
+    }
+
+    prefixes
+}
+
+fn proxied_url(prefix: &str, source_url: &str) -> String {
+    if prefix.is_empty() {
+        source_url.to_string()
+    } else {
+        format!("{}{}", prefix, source_url)
+    }
 }
 
 fn detect_platform() -> Result<(String, String)> {
