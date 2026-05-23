@@ -98,19 +98,11 @@ github_prefixes() {
     return
   fi
 
-  if is_likely_cn || ! github_direct_ok; then
-    printf '%s\n' "https://gh-proxy.com/"
-    printf '%s\n' "https://gh.jasonzeng.dev/"
-    printf '%s\n' "https://ghfast.top/"
-    printf '%s\n' "https://gh.llkk.cc/"
-    printf '%s\n' ""
-  else
-    printf '%s\n' ""
-    printf '%s\n' "https://gh-proxy.com/"
-    printf '%s\n' "https://gh.jasonzeng.dev/"
-    printf '%s\n' "https://ghfast.top/"
-    printf '%s\n' "https://gh.llkk.cc/"
-  fi
+  printf '%s\n' "https://gh-proxy.com/"
+  printf '%s\n' "https://gh.jasonzeng.dev/"
+  printf '%s\n' "https://ghfast.top/"
+  printf '%s\n' "https://gh.llkk.cc/"
+  printf '%s\n' ""
 }
 
 proxied_url() {
@@ -143,6 +135,64 @@ download_first() {
 
     warn "download failed, trying next source"
   done < <(github_prefixes)
+
+  die "failed to download $source_url"
+}
+
+rank_github_prefixes() {
+  local probe_url="$1"
+  local prefix
+  local url
+  local result_file
+  local total
+
+  result_file="$TMP_DIR/github-prefix-speed.txt"
+  : > "$result_file"
+
+  while IFS= read -r prefix; do
+    url="$(proxied_url "$prefix" "$probe_url")"
+    total="$(
+      curl -fL --connect-timeout 4 --max-time 12 \
+        -o /dev/null \
+        -w '%{time_total}' \
+        "$url" 2>/dev/null || true
+    )"
+
+    if [ -n "$total" ]; then
+      printf '%s\t%s\n' "$total" "$prefix" >> "$result_file"
+      info "GitHub source reachable in ${total}s: ${url}"
+      if [ -n "$prefix" ] && [ -z "${MIHOMOT_REGION:-}" ]; then
+        DETECTED_REGION="cn"
+      fi
+    else
+      warn "GitHub source probe failed: $url"
+    fi
+  done < <(github_prefixes)
+
+  if [ -s "$result_file" ]; then
+    sort -n "$result_file" | awk -F '\t' '{print $2}'
+  else
+    github_prefixes
+  fi
+}
+
+download_with_ranked_prefixes() {
+  local source_url="$1"
+  local output="$2"
+  local probe_url="$3"
+  local prefix
+  local url
+
+  while IFS= read -r prefix; do
+    url="$(proxied_url "$prefix" "$source_url")"
+    info "downloading: $url"
+
+    if curl -fL --retry 1 --connect-timeout 10 --speed-time 20 --speed-limit 10240 --max-time 300 -o "$output" "$url"; then
+      return
+    fi
+
+    warn "download failed or too slow, trying next source"
+  done < <(rank_github_prefixes "$probe_url")
 
   die "failed to download $source_url"
 }
@@ -412,8 +462,14 @@ main() {
     info "installing latest ${BIN_NAME} for ${target}"
   fi
 
-  download_first "${release_base}/${package}.tar.gz" "$archive"
-  download_first "${release_base}/${package}.tar.gz.sha256" "$checksum"
+  download_with_ranked_prefixes \
+    "${release_base}/${package}.tar.gz" \
+    "$archive" \
+    "${release_base}/${package}.tar.gz.sha256"
+  download_with_ranked_prefixes \
+    "${release_base}/${package}.tar.gz.sha256" \
+    "$checksum" \
+    "${release_base}/${package}.tar.gz.sha256"
 
   info "verifying checksum"
   (cd "$TMP_DIR" && sha256sum -c "${package}.tar.gz.sha256")

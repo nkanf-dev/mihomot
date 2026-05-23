@@ -201,6 +201,9 @@ On startup, mihomot auto-detects or installs the mihomo kernel:
 Set `MIHOMOT_REGION=cn` to force mirror proxy.
 Set `MIHOMOT_MIHOMO_IMAGE=<image>` to force a specific mihomo Docker image.
 Set `MIHOMOT_NO_RESOLVED=1` to leave systemd-resolved unchanged during installation.
+Set `MIHOMOT_GITHUB_PROXY=<prefix>` to force a GitHub proxy prefix, or `MIHOMOT_GITHUB_PROXY=direct` to skip proxies.
+
+When `MIHOMOT_GITHUB_PROXY` is not set, the installer probes the release checksum through each GitHub source first and downloads the larger release archive from the fastest reachable source.
 
 The generated default config enables TUN, listens for DNS on `127.0.0.1:53`, routes LAN/CN traffic directly, and sends other traffic through the `Proxy` group. It excludes local, private, carrier-grade NAT, link-local, multicast, and reserved address ranges from TUN routing so SSH and server management traffic remain direct.
 
