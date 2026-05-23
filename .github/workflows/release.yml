@@ -83,6 +83,7 @@ jobs:
           tag="${{ needs.prepare.outputs.tag }}"
           target="${{ matrix.target }}"
           package="${BIN_NAME}-${tag}-${target}"
+          latest_package="${BIN_NAME}-${target}"
 
           mkdir -p "dist/$package"
           cp "target/release/${BIN_NAME}" "dist/$package/"
@@ -90,6 +91,9 @@ jobs:
 
           tar -C dist -czf "${package}.tar.gz" "$package"
           sha256sum "${package}.tar.gz" > "${package}.tar.gz.sha256"
+
+          cp "${package}.tar.gz" "${latest_package}.tar.gz"
+          sha256sum "${latest_package}.tar.gz" > "${latest_package}.tar.gz.sha256"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
