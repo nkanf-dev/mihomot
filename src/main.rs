@@ -222,6 +222,11 @@ async fn run_tui(
                     let detected_url = u.or_else(|| {
                         mc.external_controller.map(|ec| {
                             let (host, port) = config::parse_external_controller(&ec);
+                            let host = if host == "0.0.0.0" || host == "::" || host.is_empty() {
+                                "127.0.0.1"
+                            } else {
+                                host.as_str()
+                            };
                             format!("http://{}:{}", host, port)
                         })
                     });

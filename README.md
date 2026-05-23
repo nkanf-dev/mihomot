@@ -142,7 +142,7 @@ mihomot serve -c /path/to/config.yaml  # custom config path
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `-c, --config` | mihomo config.yaml path | `~/.config/mihomo/config.yaml` |
+| `-c, --config` | mihomo config.yaml path | `MIHOMOT_CONFIG`, `/etc/mihomo/config.yaml`, then `~/.config/mihomo/config.yaml` |
 | `--listen` | mihomot API listen address | `0.0.0.0:9091` |
 | `-p, --port` | port (overrides --listen) | `9091` |
 
@@ -152,6 +152,7 @@ mihomot serve -c /path/to/config.yaml  # custom config path
 mihomot tui                              # auto-detect from config
 mihomot tui -p 9090                      # mihomo API port
 mihomot tui -U http://1.2.3.4:9090 -S s  # manual endpoint & secret
+mihomot tui -c /etc/mihomo/config.yaml   # server install config
 ```
 
 | Flag | Description | Default |
@@ -160,6 +161,8 @@ mihomot tui -U http://1.2.3.4:9090 -S s  # manual endpoint & secret
 | `-S, --secret` | mihomo API secret | auto-detect from config |
 | `-c, --config` | mihomo config.yaml path | `~/.config/mihomo/config.yaml` |
 | `-p, --port` | mihomo API port | - |
+
+On servers installed by `install.sh`, `mihomot tui` automatically prefers `/etc/mihomo/config.yaml` when it exists, so it can read the installed secret and connect to the local mihomo API without extra flags.
 
 ## HTTP API
 

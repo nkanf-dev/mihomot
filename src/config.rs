@@ -17,8 +17,19 @@ pub struct MihomoConfig {
     pub extra: serde_yaml::Value,
 }
 
-/// Get the default mihomo config path: ~/.config/mihomo/config.yaml
+/// Get the default mihomo config path.
 pub fn default_config_path() -> PathBuf {
+    if let Ok(path) = std::env::var("MIHOMOT_CONFIG")
+        && !path.trim().is_empty()
+    {
+        return PathBuf::from(path);
+    }
+
+    let system_path = PathBuf::from("/etc/mihomo/config.yaml");
+    if system_path.exists() {
+        return system_path;
+    }
+
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home)
         .join(".config")
@@ -139,5 +150,19 @@ secret: test123
         assert_eq!(config.mode, "rule");
         assert_eq!(config.mixed_port, Some(7890));
         assert_eq!(config.secret.as_deref(), Some("test123"));
+    }
+
+    #[test]
+    fn default_config_path_honors_env_override() {
+        unsafe {
+            std::env::set_var("MIHOMOT_CONFIG", "/tmp/mihomot-test-config.yaml");
+        }
+        assert_eq!(
+            default_config_path(),
+            PathBuf::from("/tmp/mihomot-test-config.yaml")
+        );
+        unsafe {
+            std::env::remove_var("MIHOMOT_CONFIG");
+        }
     }
 }
