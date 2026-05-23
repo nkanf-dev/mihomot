@@ -936,7 +936,7 @@ async fn ensure_cloudflared(state_dir: &std::path::Path) -> Result<PathBuf> {
         target
     );
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(900))
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()?;
     let mut last_err = None;

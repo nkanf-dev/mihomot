@@ -4,7 +4,7 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const GITHUB_API_RELEASE_URL: &str =
@@ -152,8 +152,6 @@ pub fn start(runtime: &RuntimeMode, config_path: &Path) -> Result<()> {
             }
         }
         RuntimeMode::Binary { path } => {
-            // Use status() to wait for process to be ready, then detach
-            // mihomo daemonizes itself with -d flag, so status() returns once it forks
             Command::new(path)
                 .args([
                     "-d",
@@ -163,7 +161,8 @@ pub fn start(runtime: &RuntimeMode, config_path: &Path) -> Result<()> {
                         .to_str()
                         .unwrap_or("."),
                 ])
-                .status()
+                .stdin(Stdio::null())
+                .spawn()
                 .context("Failed to start mihomo binary")?;
         }
     }
@@ -348,7 +347,7 @@ async fn download_binary(dest: &Path) -> Result<()> {
     fs_create_dir_all(dest)?;
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(900))
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()?;
     let urls = ranked_github_urls(&client, &asset.browser_download_url).await;
@@ -633,6 +632,11 @@ pub async fn download_response_with_progress(
             print_download_progress(label, downloaded, total, started);
             last_print = Instant::now();
         }
+    }
+
+    if downloaded == 0 {
+        println!();
+        return Ok(bytes);
     }
 
     print_download_progress(label, downloaded, total, started);
