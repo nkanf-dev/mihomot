@@ -924,24 +924,39 @@ async fn ensure_cloudflared(state_dir: &std::path::Path) -> Result<PathBuf> {
         "https://github.com/cloudflare/cloudflared/releases/latest/download/{}",
         target
     );
-    let bytes = reqwest::Client::builder()
+    let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
-        .build()?
-        .get(url)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
-    fs::write(&bin_path, &bytes)?;
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()?;
+    let mut last_err = None;
+    for ranked_url in mihomo::ranked_github_urls(&client, &url).await {
+        println!("Trying cloudflared: {}", ranked_url);
+        match client.get(&ranked_url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let bytes = resp.bytes().await?;
+                fs::write(&bin_path, &bytes)?;
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&bin_path, fs::Permissions::from_mode(0o755))?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&bin_path, fs::Permissions::from_mode(0o755))?;
+                }
+
+                return Ok(bin_path);
+            }
+            Ok(resp) => {
+                last_err = Some(format!("HTTP {}", resp.status()));
+            }
+            Err(err) => {
+                last_err = Some(err.to_string());
+            }
+        }
     }
 
-    Ok(bin_path)
+    anyhow::bail!(
+        "failed to download cloudflared. Last error: {}",
+        last_err.unwrap_or_else(|| "unknown".to_string())
+    );
 }
 
 async fn tunnel_url_is_usable(url: &str, secret: &str) -> bool {

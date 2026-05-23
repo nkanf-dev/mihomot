@@ -1,9 +1,13 @@
 use anyhow::{Context, Result};
+use flate2::read::GzDecoder;
+use serde::Deserialize;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-const GITHUB_RELEASE_URL: &str = "https://github.com/MetaCubeX/mihomo/releases/latest/download";
+const GITHUB_API_RELEASE_URL: &str =
+    "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest";
 const MIHOMO_IMAGE: &str = "metacubex/mihomo:latest";
 const SKILL_RAW_URL: &str = "https://raw.githubusercontent.com/nkanf-dev/mihomot/main/skill.md";
 
@@ -16,6 +20,17 @@ pub enum RuntimeMode {
     Binary {
         path: PathBuf,
     },
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubRelease {
+    assets: Vec<GithubAsset>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct GithubAsset {
+    name: String,
+    browser_download_url: String,
 }
 
 /// Return the best skill.md URL for the current network region.
@@ -326,8 +341,8 @@ fn docker_image_candidates() -> Vec<String> {
 /// Download mihomo binary with CN-aware mirror logic
 async fn download_binary(dest: &Path) -> Result<()> {
     let (os, arch) = detect_platform()?;
-    let filename = format!("mihomo-{}-{}", os, arch);
-    let gh_url = format!("{}/{}", GITHUB_RELEASE_URL, filename);
+    let asset = find_latest_mihomo_asset(&os, &arch).await?;
+    println!("Selected mihomo asset: {}", asset.name);
 
     fs_create_dir_all(dest)?;
 
@@ -335,7 +350,7 @@ async fn download_binary(dest: &Path) -> Result<()> {
         .timeout(std::time::Duration::from_secs(120))
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()?;
-    let urls = ranked_github_urls(&client, &gh_url).await;
+    let urls = ranked_github_urls(&client, &asset.browser_download_url).await;
 
     let mut last_err = None;
     for url in &urls {
@@ -343,7 +358,8 @@ async fn download_binary(dest: &Path) -> Result<()> {
         match client.get(url).send().await {
             Ok(resp) if resp.status().is_success() => {
                 let bytes = resp.bytes().await?;
-                std::fs::write(dest, &bytes)?;
+                let binary = decode_mihomo_asset(&asset.name, &bytes)?;
+                std::fs::write(dest, &binary)?;
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
@@ -371,7 +387,101 @@ async fn download_binary(dest: &Path) -> Result<()> {
     )
 }
 
-async fn ranked_github_urls(client: &reqwest::Client, source_url: &str) -> Vec<String> {
+async fn find_latest_mihomo_asset(os: &str, arch: &str) -> Result<GithubAsset> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .user_agent("mihomot")
+        .build()?;
+
+    let mut last_err = None;
+    for url in github_prefixes()
+        .into_iter()
+        .map(|prefix| proxied_url(&prefix, GITHUB_API_RELEASE_URL))
+    {
+        println!("Trying mihomo release metadata: {}", url);
+        match client.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let release = resp.json::<GithubRelease>().await?;
+                return select_mihomo_asset(release.assets, os, arch);
+            }
+            Ok(resp) => {
+                last_err = Some(format!("HTTP {}", resp.status()));
+            }
+            Err(err) => {
+                last_err = Some(err.to_string());
+            }
+        }
+    }
+
+    anyhow::bail!(
+        "failed to read latest mihomo release metadata: {}",
+        last_err.unwrap_or_else(|| "unknown".to_string())
+    )
+}
+
+fn select_mihomo_asset(assets: Vec<GithubAsset>, os: &str, arch: &str) -> Result<GithubAsset> {
+    let prefix = format!("mihomo-{os}-{arch}");
+
+    let selected = if os == "linux" && arch == "amd64" {
+        assets
+            .iter()
+            .find(|asset| {
+                asset.name.starts_with("mihomo-linux-amd64-compatible-")
+                    && asset.name.ends_with(".gz")
+            })
+            .or_else(|| {
+                assets.iter().find(|asset| {
+                    asset.name.starts_with("mihomo-linux-amd64-v1-") && asset.name.ends_with(".gz")
+                })
+            })
+            .or_else(|| {
+                assets.iter().find(|asset| {
+                    asset.name.starts_with("mihomo-linux-amd64-")
+                        && asset.name.ends_with(".gz")
+                        && !asset.name.contains("-go")
+                        && !asset.name.contains("-v2-")
+                        && !asset.name.contains("-v3-")
+                })
+            })
+    } else {
+        assets
+            .iter()
+            .find(|asset| asset.name.starts_with(&prefix) && asset.name.ends_with(".gz"))
+    };
+
+    selected.cloned().with_context(|| {
+        let available = assets
+            .iter()
+            .map(|asset| asset.name.as_str())
+            .filter(|name| name.starts_with(&prefix))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "no matching mihomo asset for {os}/{arch}. Available matching assets: {}",
+            if available.is_empty() {
+                "(none)".to_string()
+            } else {
+                available
+            }
+        )
+    })
+}
+
+fn decode_mihomo_asset(name: &str, bytes: &[u8]) -> Result<Vec<u8>> {
+    if !name.ends_with(".gz") {
+        return Ok(bytes.to_vec());
+    }
+
+    let mut decoder = GzDecoder::new(bytes);
+    let mut decoded = Vec::new();
+    decoder
+        .read_to_end(&mut decoded)
+        .with_context(|| format!("failed to decompress {name}"))?;
+    Ok(decoded)
+}
+
+pub async fn ranked_github_urls(client: &reqwest::Client, source_url: &str) -> Vec<String> {
     let candidates = github_prefixes()
         .into_iter()
         .map(|prefix| proxied_url(&prefix, source_url))
@@ -486,4 +596,47 @@ fn fs_create_dir_all(path: &Path) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GithubAsset, select_mihomo_asset};
+
+    fn asset(name: &str) -> GithubAsset {
+        GithubAsset {
+            name: name.to_string(),
+            browser_download_url: format!("https://example.invalid/{name}"),
+        }
+    }
+
+    #[test]
+    fn select_mihomo_asset_prefers_amd64_compatible_build() {
+        let selected = select_mihomo_asset(
+            vec![
+                asset("mihomo-linux-amd64-v1-v1.19.25.gz"),
+                asset("mihomo-linux-amd64-compatible-v1.19.25.gz"),
+                asset("mihomo-linux-amd64-v3-v1.19.25.gz"),
+            ],
+            "linux",
+            "amd64",
+        )
+        .unwrap();
+
+        assert_eq!(selected.name, "mihomo-linux-amd64-compatible-v1.19.25.gz");
+    }
+
+    #[test]
+    fn select_mihomo_asset_handles_arm64_gzip() {
+        let selected = select_mihomo_asset(
+            vec![
+                asset("mihomo-linux-arm64-v1.19.25.deb"),
+                asset("mihomo-linux-arm64-v1.19.25.gz"),
+            ],
+            "linux",
+            "arm64",
+        )
+        .unwrap();
+
+        assert_eq!(selected.name, "mihomo-linux-arm64-v1.19.25.gz");
+    }
 }

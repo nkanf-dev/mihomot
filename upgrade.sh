@@ -231,7 +231,8 @@ print_agent_instructions() {
   fi
 
   info "waiting for mihomot agent instructions"
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
+  wait_attempt=1
+  while [ "$wait_attempt" -le 60 ]; do
     if as_root journalctl -u "${SERVICE_NAME}.service" --since "2 minutes ago" -n 200 --no-pager \
       | awk '
         /━━━━━━━━/ && !capture {last_sep=$0}
@@ -261,6 +262,7 @@ print_agent_instructions() {
       return
     fi
     sleep 1
+    wait_attempt=$((wait_attempt + 1))
   done
 
   warn "could not find agent instructions in journal yet"
