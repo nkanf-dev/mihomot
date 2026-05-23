@@ -429,6 +429,54 @@ EOF
   as_root systemctl enable --now "${SERVICE_NAME}.service"
 }
 
+install_tui_settings() {
+  local target_user
+  local target_home
+  local settings_dir
+  local settings_file
+  local tmp_settings
+  local secret
+  local controller
+  local port
+
+  target_user="${SUDO_USER:-$(id -un)}"
+  if [ "$target_user" = "root" ]; then
+    target_home="/root"
+  else
+    target_home="$(getent passwd "$target_user" 2>/dev/null | awk -F: '{print $6}')"
+  fi
+  [ -n "$target_home" ] || target_home="${HOME:-/root}"
+
+  secret="$(as_root awk -F ': *' '/^secret:/ {print $2; exit}' "$CONFIG_PATH" | tr -d '\"' || true)"
+  controller="$(as_root awk -F ': *' '/^external-controller:/ {print $2; exit}' "$CONFIG_PATH" | tr -d '\"' || true)"
+  port="${controller##*:}"
+  case "$port" in
+    '' | *[!0-9]*)
+      port="9090"
+      ;;
+  esac
+
+  settings_dir="${target_home}/.config/mihomot"
+  settings_file="${settings_dir}/settings.json"
+  tmp_settings="$TMP_DIR/settings.json"
+
+  cat > "$tmp_settings" <<EOF
+{
+  "base_url": "http://127.0.0.1:${port}",
+  "api_secret": "${secret}",
+  "test_url": "https://www.google.com",
+  "test_timeout": 3000
+}
+EOF
+
+  info "writing TUI settings for ${target_user}: ${settings_file}"
+  as_root mkdir -p "$settings_dir"
+  as_root install -m 600 "$tmp_settings" "$settings_file"
+  if [ "$target_user" != "root" ]; then
+    as_root chown -R "${target_user}:${target_user}" "$settings_dir" 2>/dev/null || true
+  fi
+}
+
 main() {
   [ "$(uname -s)" = "Linux" ] || die "install.sh only supports Linux"
 
@@ -486,6 +534,7 @@ main() {
   fix_legacy_cn_geoip_rule
   install_systemd_service
   install_resolved_dns
+  install_tui_settings
 
   info "mihomot installed successfully"
   printf '\nNext steps:\n'

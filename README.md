@@ -176,6 +176,8 @@ mihomot tui -c /etc/mihomo/config.yaml   # server install config
 
 On servers installed by `install.sh`, `mihomot tui` automatically prefers `/etc/mihomo/config.yaml` when it exists, so it can read the installed secret and connect to the local mihomo API without extra flags.
 
+The install and upgrade scripts also write `~/.config/mihomot/settings.json` for the user running the script (or `SUDO_USER`) with the local API URL and secret, so `mihomot tui` works even when `/etc/mihomo/config.yaml` is root-readable only.
+
 ## HTTP API
 
 mihomot exposes an HTTP API for config.yaml operations that mihomo's native API doesn't cover.
