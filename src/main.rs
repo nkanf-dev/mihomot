@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use app::ConfigEntry;
 use clap::{Parser, Subcommand};
 
@@ -99,8 +99,19 @@ async fn run_serve(config_override: Option<String>, listen: String) -> Result<()
     }
 
     // Read mihomo config to get external-controller and secret
-    let mihomo_config =
-        config::read_config(&config_path).context("Failed to parse mihomo config.yaml")?;
+    let mihomo_config = match config::read_config(&config_path) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("Failed to read mihomo config at: {}", config_path.display());
+            eprintln!("Error: {err:#}");
+            if config_path == std::path::PathBuf::from("/etc/mihomo/config.yaml") {
+                eprintln!("This install config is usually root-readable only.");
+                eprintln!("Start the server with: sudo mihomot");
+                eprintln!("For local management, run: mihomot tui");
+            }
+            std::process::exit(1);
+        }
+    };
 
     let (host, port) = config::parse_external_controller(
         mihomo_config
@@ -215,7 +226,7 @@ async fn run_tui(
         (u, s) => {
             let config_path = match &config_override {
                 Some(p) => std::path::PathBuf::from(p),
-                None => config::default_config_path(),
+                None => config::user_config_path(),
             };
             if config_path.exists() {
                 if let Ok(mc) = config::read_config(&config_path) {
