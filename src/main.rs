@@ -1,60 +1,237 @@
-use anyhow::Result;
-use clap::Parser;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use ratatui::DefaultTerminal;
+use anyhow::{Context, Result};
+use app::ConfigEntry;
+use clap::{Parser, Subcommand};
 
 mod app;
+mod config;
+mod mihomo;
+mod server;
+mod token;
 mod ui;
 
-use app::{App, ConfigEntry, Focus};
-
 #[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
+#[command(version, about = "mihomot - AI native mihomo manager")]
 struct Args {
-    /// Temporary API URL to use
-    #[arg(short = 'U', long)]
-    url: Option<String>,
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
 
-    /// Temporary API Secret to use
-    #[arg(short = 'S', long)]
-    secret: Option<String>,
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Start the mihomot API server (default)
+    Serve {
+        /// Config file path (default: ~/.config/mihomo/config.yaml)
+        #[arg(short, long)]
+        config: Option<String>,
+        /// Listen address for the mihomot API
+        #[arg(long, default_value = "0.0.0.0:9091")]
+        listen: String,
+        /// Port for the mihomot API (overrides port in --listen)
+        #[arg(short, long)]
+        port: Option<u16>,
+    },
+    /// Launch the TUI client
+    Tui {
+        /// mihomo external-controller URL (default: auto-detect from config)
+        #[arg(short = 'U', long)]
+        url: Option<String>,
+        /// mihomo API secret (default: auto-detect from config)
+        #[arg(short = 'S', long)]
+        secret: Option<String>,
+        /// Config file path (default: ~/.config/mihomo/config.yaml)
+        #[arg(short, long)]
+        config: Option<String>,
+        /// mihomo API port (shorthand for --url http://127.0.0.1:<port>)
+        #[arg(short, long)]
+        port: Option<u16>,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
+    match args.command.unwrap_or(Commands::Serve {
+        config: None,
+        listen: "0.0.0.0:9091".to_string(),
+        port: None,
+    }) {
+        Commands::Serve {
+            config,
+            listen,
+            port,
+        } => {
+            let listen = if let Some(port) = port {
+                // Override port in listen address
+                let host = listen.rsplit_once(':').map(|(h, _)| h).unwrap_or("0.0.0.0");
+                format!("{}:{}", host, port)
+            } else {
+                listen
+            };
+            run_serve(config, listen).await
+        }
+        Commands::Tui {
+            url,
+            secret,
+            config,
+            port,
+        } => {
+            let url = match (url, port) {
+                (Some(u), _) => Some(u),
+                (None, Some(p)) => Some(format!("http://127.0.0.1:{}", p)),
+                (None, None) => None,
+            };
+            run_tui(url, secret, config).await
+        }
+    }
+}
+
+async fn run_serve(config_override: Option<String>, listen: String) -> Result<()> {
+    let config_path = match config_override {
+        Some(p) => std::path::PathBuf::from(p),
+        None => config::default_config_path(),
+    };
+
+    if !config_path.exists() {
+        eprintln!("mihomo config not found at: {}", config_path.display());
+        eprintln!("Please create it first or specify --config <path>");
+        std::process::exit(1);
+    }
+
+    // Read mihomo config to get external-controller and secret
+    let mihomo_config =
+        config::read_config(&config_path).context("Failed to parse mihomo config.yaml")?;
+
+    let (host, port) = config::parse_external_controller(
+        mihomo_config
+            .external_controller
+            .as_deref()
+            .unwrap_or("0.0.0.0:9090"),
+    );
+    let secret = mihomo_config.secret.unwrap_or_default();
+
+    // Determine the reachable endpoint for the token
+    let mihomo_endpoint = {
+        // Try to find a non-loopback IP for the token
+        let ip = find_server_ip().unwrap_or_else(|| "127.0.0.1".to_string());
+        let bind_host = if host == "0.0.0.0" || host == "::" {
+            &ip
+        } else {
+            &host
+        };
+        format!("http://{}:{}", bind_host, port)
+    };
+
+    // Generate token
+    let token_str = token::generate_token(&secret)?;
+    token::save_token(&token_str).ok(); // best-effort
+
+    // Print startup message
+    println!();
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("把这段话发给你的 AI agent:");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!();
+    println!("我已安装 mihomot，请帮我管理我这个服务器的代理。");
+    println!("如果没有安装skill先安装这个skill: https://mihomot.dev/skill.md");
+    println!("token: {}", token_str);
+    println!();
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!();
+
+    // Ensure mihomo is available (detect or auto-install)
+    let runtime = mihomo::ensure_mihomo(&config_path).await?;
+    println!("mihomo runtime: {:?}", runtime);
+
+    if !mihomo::check_alive(&mihomo_endpoint, &secret)
+        .await
+        .unwrap_or(false)
+    {
+        println!("mihomo is not responding, attempting to start...");
+        if let Err(e) = mihomo::start(&runtime, &config_path) {
+            eprintln!("Failed to start mihomo: {}", e);
+        } else {
+            // Wait for mihomo to be ready
+            for _ in 0..10 {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if mihomo::check_alive(&mihomo_endpoint, &secret)
+                    .await
+                    .unwrap_or(false)
+                {
+                    println!("mihomo started successfully.");
+                    break;
+                }
+            }
+        }
+    }
+
+    // Start HTTP API server
+    println!("Starting mihomot API server on {}...", listen);
+    server::start_server(&listen, config_path, secret, mihomo_endpoint).await?;
+
+    Ok(())
+}
+
+async fn run_tui(
+    url: Option<String>,
+    secret: Option<String>,
+    config_override: Option<String>,
+) -> Result<()> {
+    // Auto-detect url/secret from mihomo config if not provided
+    let (url, secret) = match (url, secret) {
+        (Some(u), Some(s)) => (Some(u), Some(s)),
+        (u, s) => {
+            let config_path = match &config_override {
+                Some(p) => std::path::PathBuf::from(p),
+                None => config::default_config_path(),
+            };
+            if config_path.exists() {
+                if let Ok(mc) = config::read_config(&config_path) {
+                    let detected_url = u.or_else(|| {
+                        mc.external_controller.map(|ec| {
+                            let (host, port) = config::parse_external_controller(&ec);
+                            format!("http://{}:{}", host, port)
+                        })
+                    });
+                    let detected_secret = s.or(mc.secret);
+                    (detected_url, detected_secret)
+                } else {
+                    (u, s)
+                }
+            } else {
+                (u, s)
+            }
+        }
+    };
+
     let mut terminal = ratatui::init();
 
-    // Create app and fetch initial data
-    let mut app = App::new(args.url, args.secret);
+    let mut app = app::App::new(url, secret);
     let _ = app.fetch_proxies().await;
     let _ = app.fetch_config().await;
     app.trigger_latency_test();
 
     let app_result = run_app(&mut terminal, &mut app).await;
 
-    // Restore terminal
     ratatui::restore();
 
     app_result
 }
 
-async fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
+async fn run_app(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App) -> Result<()> {
+    use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+
     loop {
         terminal.draw(|f| ui::draw(f, app))?;
 
-        // Check for real latency updates
         if let Ok(status) = app.real_latency_rx.try_recv() {
             app.real_latency_status = status;
         }
 
-        // Check for proxy latency updates
         while let Ok((name, latency)) = app.proxy_test_rx.try_recv() {
             app.proxy_latency.insert(name, Some(latency));
         }
 
-        // Check for traffic updates
         while let Ok(traffic) = app.traffic_rx.try_recv() {
             app.on_traffic(traffic);
         }
@@ -97,15 +274,14 @@ async fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                     KeyCode::Char('k') | KeyCode::Up => app.scroll_popup_up(),
                     _ => {}
                 }
-            } else if let Focus::Settings = app.focus {
+            } else if let app::Focus::Settings = app.focus {
                 match key.code {
                     KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('s') => {
-                        app.focus = app.previous_focus.clone(); // Return to previous view
+                        app.focus = app.previous_focus.clone();
                     }
                     KeyCode::Char('j') | KeyCode::Down => app.next_setting(),
                     KeyCode::Char('k') | KeyCode::Up => app.previous_setting(),
                     KeyCode::Enter => {
-                        // Handle config change
                         if let Some(idx) = app.settings_state.selected()
                             && let Some(entry) = app.settings_items.get(idx).cloned()
                         {
@@ -142,7 +318,6 @@ async fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                                             | ConfigEntry::TestUrl
                                             | ConfigEntry::TestTimeout
                                     ) {
-                                        // Fallback if config is not loaded yet (e.g. wrong URL initially)
                                         app.editing_value = match entry {
                                             ConfigEntry::BaseUrl => {
                                                 app.app_settings.base_url.clone()
@@ -176,7 +351,7 @@ async fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                 match key.code {
                     KeyCode::Char('q') => return Ok(()),
                     KeyCode::Char('r') => {
-                        if let Focus::Proxies = app.focus {
+                        if let app::Focus::Proxies = app.focus {
                             app.trigger_group_latency_test();
                         }
                         let _ = app.fetch_proxies().await;
@@ -187,31 +362,31 @@ async fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                     }
                     KeyCode::Char('s') => {
                         app.previous_focus = app.focus.clone();
-                        app.focus = Focus::Settings;
+                        app.focus = app::Focus::Settings;
                     }
                     KeyCode::Char('i') => {
-                        if let Focus::Proxies = app.focus {
+                        if let app::Focus::Proxies = app.focus {
                             app.show_info_popup = true;
                         }
                     }
                     KeyCode::Down | KeyCode::Char('j') => match app.focus {
-                        Focus::Groups => app.next_group(),
-                        Focus::Proxies => app.next_proxy(),
+                        app::Focus::Groups => app.next_group(),
+                        app::Focus::Proxies => app.next_proxy(),
                         _ => {}
                     },
                     KeyCode::Up | KeyCode::Char('k') => match app.focus {
-                        Focus::Groups => app.previous_group(),
-                        Focus::Proxies => app.previous_proxy(),
+                        app::Focus::Groups => app.previous_group(),
+                        app::Focus::Proxies => app.previous_proxy(),
                         _ => {}
                     },
                     KeyCode::Right | KeyCode::Char('l') => {
-                        app.focus = Focus::Proxies;
+                        app.focus = app::Focus::Proxies;
                     }
                     KeyCode::Left | KeyCode::Char('h') | KeyCode::Esc => {
-                        app.focus = Focus::Groups;
+                        app.focus = app::Focus::Groups;
                     }
                     KeyCode::Enter => {
-                        if let Focus::Proxies = app.focus {
+                        if let app::Focus::Proxies = app.focus {
                             if let Some(group_name) = app.get_selected_group_name()
                                 && let Some(proxy_name) = app.get_selected_proxy_name()
                             {
@@ -226,7 +401,7 @@ async fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                                 }
                             }
                         } else {
-                            app.focus = Focus::Proxies;
+                            app.focus = app::Focus::Proxies;
                         }
                     }
                     _ => {}
@@ -236,7 +411,7 @@ async fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
     }
 }
 
-async fn handle_setting_change(app: &mut App, entry: ConfigEntry) -> Result<()> {
+async fn handle_setting_change(app: &mut app::App, entry: ConfigEntry) -> Result<()> {
     if let Some(config) = &app.config {
         match entry {
             ConfigEntry::Mode => {
@@ -280,7 +455,9 @@ async fn handle_setting_change(app: &mut App, entry: ConfigEntry) -> Result<()> 
     Ok(())
 }
 
-async fn commit_edit(app: &mut App) -> Result<()> {
+async fn commit_edit(app: &mut app::App) -> Result<()> {
+    use app::ConfigEntry;
+
     if let Some(idx) = app.settings_state.selected()
         && let Some(entry) = app.settings_items.get(idx).cloned()
     {
@@ -324,4 +501,9 @@ async fn commit_edit(app: &mut App) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Find a non-loopback server IP
+fn find_server_ip() -> Option<String> {
+    local_ip_address::local_ip().ok().map(|ip| ip.to_string())
 }
