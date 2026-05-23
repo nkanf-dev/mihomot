@@ -578,7 +578,7 @@ main() {
   info "mihomot installed successfully"
   print_agent_instructions
   printf '\nLocal TUI: mihomot tui\n'
-  printf 'Temporary tunnel: mihomot tunnel\n'
+  printf 'Temporary tunnel: sudo mihomot tunnel\n'
   printf '  Use this when TCP 9091 is not open; the trycloudflare endpoint is temporary.\n'
   printf '\nStatus: systemctl status %s\n' "$SERVICE_NAME"
 }

@@ -181,10 +181,10 @@ The install and upgrade scripts write `~/.config/mihomot/settings.json` for the 
 If opening TCP `9091` is inconvenient, start a temporary Cloudflare Tunnel:
 
 ```bash
-mihomot tunnel
+sudo mihomot tunnel
 ```
 
-`mihomot tunnel` installs `cloudflared` into `~/.config/mihomot` when it is not already available, starts it in the background, reuses an existing tunnel on the next run, and prints an agent message with a `https://*.trycloudflare.com` endpoint. The endpoint is temporary: it remains useful only while the background `cloudflared` process is alive.
+`sudo mihomot tunnel` installs `cloudflared` into root's mihomot state directory when it is not already available, starts it in the background, reuses an existing tunnel on the next run, and prints an agent message with a `https://*.trycloudflare.com` endpoint. Use `sudo` so the command can read the root-readable `/etc/mihomo/config.yaml` secret. The endpoint is temporary: it remains useful only while the background `cloudflared` process is alive.
 
 ## HTTP API
 
