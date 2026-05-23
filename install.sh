@@ -175,6 +175,9 @@ external-controller: 0.0.0.0:9090
 secret: ${secret}
 mixed-port: 7890
 mode: rule
+ipv6: false
+geox-url:
+  mmdb: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb"
 
 tun:
   enable: true
@@ -182,11 +185,25 @@ tun:
   auto-route: true
   auto-detect-interface: true
   dns-hijack: ["any:53"]
+  route-exclude-address:
+    - 0.0.0.0/8
+    - 10.0.0.0/8
+    - 100.64.0.0/10
+    - 127.0.0.0/8
+    - 169.254.0.0/16
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - 224.0.0.0/4
+    - 240.0.0.0/4
 
 dns:
   enable: true
+  listen: 127.0.0.1:53
   enhanced-mode: fake-ip
-  nameserver: [223.5.5.5, 119.29.29.29]
+  fake-ip-range: 198.18.0.1/16
+  nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
 
 proxy-groups:
   - name: Proxy
@@ -195,12 +212,53 @@ proxy-groups:
       - DIRECT
 
 rules:
+  - GEOIP,LAN,DIRECT,no-resolve
+  - GEOIP,CN,DIRECT,no-resolve
   - MATCH,Proxy
 EOF
 
   info "creating default mihomo config: $CONFIG_PATH"
   as_root mkdir -p "$config_dir"
   as_root install -m 600 "$tmp_config" "$CONFIG_PATH"
+}
+
+download_geoip_database() {
+  local config_dir
+  local output
+  local tmp_geoip
+  local urls
+  local url
+
+  config_dir="$(dirname "$CONFIG_PATH")"
+  output="${config_dir}/Country.mmdb"
+  tmp_geoip="$TMP_DIR/Country.mmdb"
+  urls="
+https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb
+https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb
+https://gh-proxy.com/https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/country.mmdb
+https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/country.mmdb
+"
+
+  if as_root test -s "$output"; then
+    info "GeoIP database already exists: $output"
+    return
+  fi
+
+  while IFS= read -r url; do
+    [ -n "$url" ] || continue
+    info "downloading GeoIP database: $url"
+    if curl -fL --retry 2 --connect-timeout 10 --max-time 180 -o "$tmp_geoip" "$url"; then
+      as_root mkdir -p "$config_dir"
+      as_root install -m 644 "$tmp_geoip" "$output"
+      info "GeoIP database installed: $output"
+      return
+    fi
+    warn "GeoIP database download failed, trying next source"
+  done <<EOF
+$urls
+EOF
+
+  warn "failed to download GeoIP database; GEOIP,CN rules may fail until mihomo can download MMDB"
 }
 
 fix_legacy_cn_geoip_rule() {
@@ -216,6 +274,11 @@ fix_legacy_cn_geoip_rule() {
     return
   fi
 
+  if as_root test -s "$(dirname "$CONFIG_PATH")/Country.mmdb"; then
+    info "keeping GEOIP,CN,DIRECT because GeoIP database is available"
+    return
+  fi
+
   local backup_path
   backup_path="${CONFIG_PATH}.bak.$(date +%Y%m%d%H%M%S)"
 
@@ -223,6 +286,46 @@ fix_legacy_cn_geoip_rule() {
   as_root cp "$CONFIG_PATH" "$backup_path"
   as_root sed -i '/^[[:space:]]*-[[:space:]]*GEOIP,CN,DIRECT[[:space:]]*$/d' "$CONFIG_PATH"
   info "backup saved to ${backup_path}"
+}
+
+install_resolved_dns() {
+  if [ "${MIHOMOT_NO_RESOLVED:-}" = "1" ]; then
+    info "skipping systemd-resolved DNS setup because MIHOMOT_NO_RESOLVED=1"
+    return
+  fi
+
+  if ! has_cmd systemctl || [ ! -d /run/systemd/system ]; then
+    warn "systemd is not available; skipping systemd-resolved DNS setup"
+    return
+  fi
+
+  if ! systemctl list-unit-files systemd-resolved.service --no-legend 2>/dev/null \
+    | awk '{print $1}' \
+    | grep -qx 'systemd-resolved.service'; then
+    warn "systemd-resolved is not installed; skipping DNS setup"
+    return
+  fi
+
+  local resolved_dir
+  local resolved_file
+  local tmp_resolved
+
+  resolved_dir="/etc/systemd/resolved.conf.d"
+  resolved_file="${resolved_dir}/mihomot.conf"
+  tmp_resolved="$TMP_DIR/mihomot-resolved.conf"
+
+  cat > "$tmp_resolved" <<EOF
+[Resolve]
+DNS=127.0.0.1
+Domains=~.
+DNSStubListener=yes
+EOF
+
+  info "configuring systemd-resolved to send DNS through mihomo"
+  as_root mkdir -p "$resolved_dir"
+  as_root install -m 644 "$tmp_resolved" "$resolved_file"
+  as_root systemctl enable --now systemd-resolved.service >/dev/null 2>&1 || true
+  as_root systemctl restart systemd-resolved.service
 }
 
 install_systemd_service() {
@@ -311,8 +414,10 @@ main() {
   as_root install -m 755 "$binary_path" "${INSTALL_DIR}/${BIN_NAME}"
 
   install_default_config
+  download_geoip_database
   fix_legacy_cn_geoip_rule
   install_systemd_service
+  install_resolved_dns
 
   info "mihomot installed successfully"
   printf '\nNext steps:\n'

@@ -72,6 +72,13 @@ else
   warn "systemd is not available; skipping service removal"
 fi
 
+if [ "$PURGE" = true ] && has_cmd systemctl && [ -d /run/systemd/system ]; then
+  info "removing systemd-resolved mihomot DNS drop-in"
+  as_root rm -f /etc/systemd/resolved.conf.d/mihomot.conf
+  as_root rmdir /etc/systemd/resolved.conf.d >/dev/null 2>&1 || true
+  as_root systemctl restart systemd-resolved.service >/dev/null 2>&1 || true
+fi
+
 info "removing ${INSTALL_DIR}/${BIN_NAME}"
 as_root rm -f "${INSTALL_DIR}/${BIN_NAME}"
 

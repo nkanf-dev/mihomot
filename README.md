@@ -16,7 +16,9 @@ For mainland China networks, use the same script through a GitHub mirror:
 curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/nkanf-dev/mihomot/main/install.sh | MIHOMOT_REGION=cn bash
 ```
 
-The installer downloads the latest GitHub Release binary for your Linux architecture, verifies the `.sha256` checksum, installs `mihomot` to `/usr/local/bin`, creates `/etc/mihomo/config.yaml` if missing, and starts `mihomot.service` on systemd systems. It does not compile from source.
+The installer downloads the latest GitHub Release binary for your Linux architecture, verifies the `.sha256` checksum, installs `mihomot` to `/usr/local/bin`, creates `/etc/mihomo/config.yaml` if missing, configures systemd-resolved to send DNS through mihomo, and starts `mihomot.service` on systemd systems. It does not compile from source.
+
+Set `MIHOMOT_NO_RESOLVED=1` during installation to skip the systemd-resolved DNS drop-in.
 
 After installation, view the token with:
 
@@ -60,6 +62,9 @@ external-controller: 0.0.0.0:9090
 secret: mihomo
 mixed-port: 7890
 mode: rule
+ipv6: false
+geox-url:
+  mmdb: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb"
 
 tun:
   enable: true
@@ -67,11 +72,25 @@ tun:
   auto-route: true
   auto-detect-interface: true
   dns-hijack: ["any:53"]
+  route-exclude-address:
+    - 0.0.0.0/8
+    - 10.0.0.0/8
+    - 100.64.0.0/10
+    - 127.0.0.0/8
+    - 169.254.0.0/16
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - 224.0.0.0/4
+    - 240.0.0.0/4
 
 dns:
   enable: true
+  listen: 127.0.0.1:53
   enhanced-mode: fake-ip
-  nameserver: [223.5.5.5, 119.29.29.29]
+  fake-ip-range: 198.18.0.1/16
+  nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
 
 proxy-providers:
   MyProxies:
@@ -89,6 +108,8 @@ proxy-groups:
       - MyProxies
 
 rules:
+  - GEOIP,LAN,DIRECT,no-resolve
+  - GEOIP,CN,DIRECT,no-resolve
   - MATCH,Proxy
 ```
 
@@ -179,8 +200,11 @@ On startup, mihomot auto-detects or installs the mihomo kernel:
 
 Set `MIHOMOT_REGION=cn` to force mirror proxy.
 Set `MIHOMOT_MIHOMO_IMAGE=<image>` to force a specific mihomo Docker image.
+Set `MIHOMOT_NO_RESOLVED=1` to leave systemd-resolved unchanged during installation.
 
-The generated default config avoids `GEOIP,CN,DIRECT` because mihomo may try to download MMDB before the proxy is ready. Add GEOIP rules later after MMDB/geodata is available.
+The generated default config enables TUN, listens for DNS on `127.0.0.1:53`, routes LAN/CN traffic directly, and sends other traffic through the `Proxy` group. It excludes local, private, carrier-grade NAT, link-local, multicast, and reserved address ranges from TUN routing so SSH and server management traffic remain direct.
+
+The installer writes `/etc/systemd/resolved.conf.d/mihomot.conf` so system DNS queries go through mihomo and fake-ip routing can work by default. It also pre-downloads `Country.mmdb` into the mihomo config directory so the default `GEOIP,CN,DIRECT,no-resolve` rule can work on first start. `uninstall.sh --purge` removes the systemd-resolved drop-in.
 
 ## Multi-Server
 
