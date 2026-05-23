@@ -291,8 +291,9 @@ main() {
   info "mihomot installed successfully"
   printf '\nNext steps:\n'
   printf '  systemctl status %s\n' "$SERVICE_NAME"
-  printf '  journalctl -u %s -f\n' "$SERVICE_NAME"
-  printf '\nCopy the token printed in the logs and send it to your AI agent.\n'
+  printf '  sudo journalctl -u %s -f\n' "$SERVICE_NAME"
+  printf '\nIf mihomot is still pulling the mihomo Docker image, wait until it finishes.\n'
+  printf 'Then copy the token printed in the logs and send it to your AI agent.\n'
 }
 
 main "$@"

@@ -3,12 +3,27 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const GITHUB_RELEASE_URL: &str = "https://github.com/MetaCubeX/mihomo/releases/latest/download";
-const GHPROXY_PREFIX: &str = "https://ghproxy.com/";
+const GHPROXY_PREFIX: &str = "https://gh-proxy.com/";
+const MIHOMO_IMAGE: &str = "metacubex/mihomo:latest";
 
 #[derive(Debug)]
 pub enum RuntimeMode {
-    Docker { container_name: String },
-    Binary { path: PathBuf },
+    Docker {
+        container_name: String,
+        image: String,
+    },
+    Binary {
+        path: PathBuf,
+    },
+}
+
+/// Return the best skill.md URL for the current network region.
+pub fn skill_install_url() -> &'static str {
+    if is_likely_cn() {
+        "https://gh-proxy.com/https://raw.githubusercontent.com/nkanf-dev/mihomot/main/skill.md"
+    } else {
+        "https://mihomot.dev/skill.md"
+    }
 }
 
 /// Detect how mihomo is available: Docker container or local binary
@@ -23,6 +38,7 @@ pub fn detect_runtime() -> Result<RuntimeMode> {
             if name.trim() == "mihomo" {
                 return Ok(RuntimeMode::Docker {
                     container_name: "mihomo".to_string(),
+                    image: MIHOMO_IMAGE.to_string(),
                 });
             }
         }
@@ -66,7 +82,10 @@ pub async fn check_alive(endpoint: &str, secret: &str) -> Result<bool> {
 /// Attempt to start mihomo
 pub fn start(runtime: &RuntimeMode, config_path: &Path) -> Result<()> {
     match runtime {
-        RuntimeMode::Docker { container_name } => {
+        RuntimeMode::Docker {
+            container_name,
+            image,
+        } => {
             // Check if container exists but is stopped
             let ps_output = Command::new("docker")
                 .args([
@@ -109,7 +128,7 @@ pub fn start(runtime: &RuntimeMode, config_path: &Path) -> Result<()> {
                         "NET_ADMIN",
                         "--device",
                         "/dev/net/tun",
-                        "metacubex/mihomo:latest",
+                        image,
                     ])
                     .output()
                     .context("Failed to create docker container")?;
@@ -181,19 +200,14 @@ pub async fn ensure_mihomo(config_path: &Path) -> Result<RuntimeMode> {
 
     // Try Docker first
     if has_docker() {
-        println!("Docker detected, pulling metacubex/mihomo:latest...");
-        let status = Command::new("docker")
-            .args(["pull", "metacubex/mihomo:latest"])
-            .status();
-        if let Ok(s) = status
-            && s.success()
-        {
-            println!("Docker image pulled successfully.");
+        println!("Docker detected, pulling mihomo image...");
+        if let Some(image) = pull_docker_image() {
             return Ok(RuntimeMode::Docker {
                 container_name: "mihomo".to_string(),
+                image,
             });
         }
-        eprintln!("Docker pull failed, falling back to binary download...");
+        eprintln!("Docker image pull failed, falling back to binary download...");
     }
 
     // Download binary
@@ -209,6 +223,58 @@ fn has_docker() -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+fn pull_docker_image() -> Option<String> {
+    let mut last_image = None;
+
+    for image in docker_image_candidates() {
+        println!("Trying docker image: {}", image);
+        last_image = Some(image.clone());
+        match Command::new("docker").args(["pull", &image]).status() {
+            Ok(status) if status.success() => {
+                println!("Docker image pulled successfully: {}", image);
+                return Some(image);
+            }
+            Ok(status) => {
+                eprintln!("Docker pull exited with status {}: {}", status, image);
+            }
+            Err(err) => {
+                eprintln!("Docker pull failed for {}: {}", image, err);
+            }
+        }
+    }
+
+    if let Some(image) = last_image {
+        eprintln!("Last attempted docker image: {}", image);
+    }
+    None
+}
+
+fn docker_image_candidates() -> Vec<String> {
+    if let Ok(image) = std::env::var("MIHOMOT_MIHOMO_IMAGE")
+        && !image.trim().is_empty()
+    {
+        return vec![image];
+    }
+
+    let mirrors = ["hub.1panel.dev", "docker.1panel.live"];
+
+    if is_likely_cn() {
+        mirrors
+            .iter()
+            .map(|mirror| format!("{}/{}", mirror, MIHOMO_IMAGE))
+            .chain(std::iter::once(MIHOMO_IMAGE.to_string()))
+            .collect()
+    } else {
+        std::iter::once(MIHOMO_IMAGE.to_string())
+            .chain(
+                mirrors
+                    .iter()
+                    .map(|mirror| format!("{}/{}", mirror, MIHOMO_IMAGE)),
+            )
+            .collect()
+    }
 }
 
 /// Download mihomo binary with CN-aware mirror logic

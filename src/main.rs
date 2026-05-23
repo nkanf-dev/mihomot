@@ -133,7 +133,10 @@ async fn run_serve(config_override: Option<String>, listen: String) -> Result<()
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!();
     println!("我已安装 mihomot，请帮我管理我这个服务器的代理。");
-    println!("如果没有安装skill先安装这个skill: https://mihomot.dev/skill.md");
+    println!(
+        "如果没有安装skill先安装这个skill: {}",
+        mihomo::skill_install_url()
+    );
     println!("token: {}", token_str);
     println!();
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");

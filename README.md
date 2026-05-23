@@ -18,10 +18,28 @@ curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/nkanf-dev/miho
 
 The installer downloads the latest GitHub Release binary for your Linux architecture, verifies the `.sha256` checksum, installs `mihomot` to `/usr/local/bin`, creates `/etc/mihomo/config.yaml` if missing, and starts `mihomot.service` on systemd systems. It does not compile from source.
 
+After installation, view the token with:
+
+```bash
+sudo journalctl -u mihomot -f
+```
+
 To install a specific release:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/nkanf-dev/mihomot/main/install.sh | MIHOMOT_VERSION=v0.1.0 bash
+```
+
+To uninstall:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nkanf-dev/mihomot/main/uninstall.sh | bash
+```
+
+To uninstall and remove generated config/state:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nkanf-dev/mihomot/main/uninstall.sh | bash -s -- --purge
 ```
 
 ### From Source
@@ -156,11 +174,12 @@ The token does not include the endpoint address (the server may be behind NAT). 
 
 On startup, mihomot auto-detects or installs the mihomo kernel:
 
-1. **Docker** — pulls `metacubex/mihomo:latest` and manages the container lifecycle
+1. **Docker** — pulls `metacubex/mihomo:latest` and manages the container lifecycle. In mainland China mode, it tries verified Docker Hub mirror prefixes first, then Docker Hub direct.
 2. **Local binary** — `~/.config/mihomot/mihomo` or `mihomo` in PATH
-3. **Auto-download** — tries ghproxy.com mirror first (for CN users), then GitHub direct. Falls back to manual download instructions on failure.
+3. **Auto-download** — tries GitHub release mirrors first (for CN users), then GitHub direct. Falls back to manual download instructions on failure.
 
 Set `MIHOMOT_REGION=cn` to force mirror proxy.
+Set `MIHOMOT_MIHOMO_IMAGE=<image>` to force a specific mihomo Docker image.
 
 ## Multi-Server
 
