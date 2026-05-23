@@ -104,7 +104,7 @@ async fn run_serve(config_override: Option<String>, listen: String) -> Result<()
         Err(err) => {
             eprintln!("Failed to read mihomo config at: {}", config_path.display());
             eprintln!("Error: {err:#}");
-            if config_path == std::path::PathBuf::from("/etc/mihomo/config.yaml") {
+            if config_path == std::path::Path::new("/etc/mihomo/config.yaml") {
                 eprintln!("This install config is usually root-readable only.");
                 eprintln!("Start the server with: sudo mihomot");
                 eprintln!("For local management, run: mihomot tui");
