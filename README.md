@@ -32,6 +32,18 @@ To install a specific release:
 curl -fsSL https://raw.githubusercontent.com/nkanf-dev/mihomot/main/install.sh | MIHOMOT_VERSION=v0.1.0 bash
 ```
 
+To upgrade an existing server install while preserving `/etc/mihomo/config.yaml`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nkanf-dev/mihomot/main/upgrade.sh | bash
+```
+
+For mainland China networks, use the script through a GitHub mirror. The upgrade script still probes release mirrors before downloading the larger archive:
+
+```bash
+curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/nkanf-dev/mihomot/main/upgrade.sh | MIHOMOT_REGION=cn bash
+```
+
 To uninstall:
 
 ```bash
