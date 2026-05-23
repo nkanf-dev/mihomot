@@ -325,6 +325,8 @@ main() {
   print_agent_instructions
   printf '\nConfig preserved: %s\n' "$CONFIG_PATH"
   printf 'Local TUI: mihomot tui\n'
+  printf 'Temporary tunnel: mihomot tunnel\n'
+  printf '  Use this when TCP 9091 is not open; the trycloudflare endpoint is temporary.\n'
   printf 'Check status: systemctl status %s\n' "$SERVICE_NAME"
 }
 
