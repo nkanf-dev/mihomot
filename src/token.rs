@@ -43,8 +43,7 @@ fn parse_token(token: &str, mihomot_addr: &str) -> Result<ServerInfo> {
     let decoded = BASE64
         .decode(encoded)
         .context("Failed to decode base64 in token")?;
-    let secret =
-        String::from_utf8(decoded).context("Token payload is not valid UTF-8")?;
+    let secret = String::from_utf8(decoded).context("Token payload is not valid UTF-8")?;
 
     Ok(ServerInfo {
         alias: alias.to_string(),

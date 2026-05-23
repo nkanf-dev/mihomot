@@ -56,7 +56,11 @@ async fn main() -> Result<()> {
         listen: "0.0.0.0:9091".to_string(),
         port: None,
     }) {
-        Commands::Serve { config, listen, port } => {
+        Commands::Serve {
+            config,
+            listen,
+            port,
+        } => {
             let listen = if let Some(port) = port {
                 // Override port in listen address
                 let host = listen.rsplit_once(':').map(|(h, _)| h).unwrap_or("0.0.0.0");
@@ -66,7 +70,12 @@ async fn main() -> Result<()> {
             };
             run_serve(config, listen).await
         }
-        Commands::Tui { url, secret, config, port } => {
+        Commands::Tui {
+            url,
+            secret,
+            config,
+            port,
+        } => {
             let url = match (url, port) {
                 (Some(u), _) => Some(u),
                 (None, Some(p)) => Some(format!("http://127.0.0.1:{}", p)),
@@ -84,17 +93,14 @@ async fn run_serve(config_override: Option<String>, listen: String) -> Result<()
     };
 
     if !config_path.exists() {
-        eprintln!(
-            "mihomo config not found at: {}",
-            config_path.display()
-        );
+        eprintln!("mihomo config not found at: {}", config_path.display());
         eprintln!("Please create it first or specify --config <path>");
         std::process::exit(1);
     }
 
     // Read mihomo config to get external-controller and secret
-    let mihomo_config = config::read_config(&config_path)
-        .context("Failed to parse mihomo config.yaml")?;
+    let mihomo_config =
+        config::read_config(&config_path).context("Failed to parse mihomo config.yaml")?;
 
     let (host, port) = config::parse_external_controller(
         mihomo_config
@@ -137,7 +143,10 @@ async fn run_serve(config_override: Option<String>, listen: String) -> Result<()
     let runtime = mihomo::ensure_mihomo(&config_path).await?;
     println!("mihomo runtime: {:?}", runtime);
 
-    if !mihomo::check_alive(&mihomo_endpoint, &secret).await.unwrap_or(false) {
+    if !mihomo::check_alive(&mihomo_endpoint, &secret)
+        .await
+        .unwrap_or(false)
+    {
         println!("mihomo is not responding, attempting to start...");
         if let Err(e) = mihomo::start(&runtime, &config_path) {
             eprintln!("Failed to start mihomo: {}", e);
@@ -145,7 +154,10 @@ async fn run_serve(config_override: Option<String>, listen: String) -> Result<()
             // Wait for mihomo to be ready
             for _ in 0..10 {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                if mihomo::check_alive(&mihomo_endpoint, &secret).await.unwrap_or(false) {
+                if mihomo::check_alive(&mihomo_endpoint, &secret)
+                    .await
+                    .unwrap_or(false)
+                {
                     println!("mihomo started successfully.");
                     break;
                 }
@@ -285,10 +297,18 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App) ->
                                         app.editing_value = match entry {
                                             ConfigEntry::MixedPort => config.mixed_port.to_string(),
                                             ConfigEntry::BindAddress => config.bind_address.clone(),
-                                            ConfigEntry::BaseUrl => app.app_settings.base_url.clone(),
-                                            ConfigEntry::ApiSecret => app.app_settings.api_secret.clone(),
-                                            ConfigEntry::TestUrl => app.app_settings.test_url.clone(),
-                                            ConfigEntry::TestTimeout => app.app_settings.test_timeout.to_string(),
+                                            ConfigEntry::BaseUrl => {
+                                                app.app_settings.base_url.clone()
+                                            }
+                                            ConfigEntry::ApiSecret => {
+                                                app.app_settings.api_secret.clone()
+                                            }
+                                            ConfigEntry::TestUrl => {
+                                                app.app_settings.test_url.clone()
+                                            }
+                                            ConfigEntry::TestTimeout => {
+                                                app.app_settings.test_timeout.to_string()
+                                            }
                                             _ => String::new(),
                                         };
                                     } else if matches!(
@@ -299,10 +319,18 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App) ->
                                             | ConfigEntry::TestTimeout
                                     ) {
                                         app.editing_value = match entry {
-                                            ConfigEntry::BaseUrl => app.app_settings.base_url.clone(),
-                                            ConfigEntry::ApiSecret => app.app_settings.api_secret.clone(),
-                                            ConfigEntry::TestUrl => app.app_settings.test_url.clone(),
-                                            ConfigEntry::TestTimeout => app.app_settings.test_timeout.to_string(),
+                                            ConfigEntry::BaseUrl => {
+                                                app.app_settings.base_url.clone()
+                                            }
+                                            ConfigEntry::ApiSecret => {
+                                                app.app_settings.api_secret.clone()
+                                            }
+                                            ConfigEntry::TestUrl => {
+                                                app.app_settings.test_url.clone()
+                                            }
+                                            ConfigEntry::TestTimeout => {
+                                                app.app_settings.test_timeout.to_string()
+                                            }
                                             _ => String::new(),
                                         };
                                     }
@@ -392,11 +420,13 @@ async fn handle_setting_change(app: &mut app::App, entry: ConfigEntry) -> Result
                     "global" => "direct",
                     _ => "rule",
                 };
-                app.update_config(serde_json::json!({ "mode": new_mode })).await?;
+                app.update_config(serde_json::json!({ "mode": new_mode }))
+                    .await?;
             }
             ConfigEntry::Tun => {
                 let new_state = !config.tun.enable;
-                app.update_config(serde_json::json!({ "tun": { "enable": new_state } })).await?;
+                app.update_config(serde_json::json!({ "tun": { "enable": new_state } }))
+                    .await?;
             }
             ConfigEntry::LogLevel => {
                 let new_level = match config.log_level.as_str() {
@@ -406,15 +436,18 @@ async fn handle_setting_change(app: &mut app::App, entry: ConfigEntry) -> Result
                     "debug" => "silent",
                     _ => "info",
                 };
-                app.update_config(serde_json::json!({ "log-level": new_level })).await?;
+                app.update_config(serde_json::json!({ "log-level": new_level }))
+                    .await?;
             }
             ConfigEntry::AllowLan => {
                 let new_state = !config.allow_lan;
-                app.update_config(serde_json::json!({ "allow-lan": new_state })).await?;
+                app.update_config(serde_json::json!({ "allow-lan": new_state }))
+                    .await?;
             }
             ConfigEntry::Ipv6 => {
                 let new_state = !config.ipv6;
-                app.update_config(serde_json::json!({ "ipv6": new_state })).await?;
+                app.update_config(serde_json::json!({ "ipv6": new_state }))
+                    .await?;
             }
             _ => {}
         }
@@ -431,11 +464,13 @@ async fn commit_edit(app: &mut app::App) -> Result<()> {
         match entry {
             ConfigEntry::MixedPort => {
                 if let Ok(port) = app.editing_value.parse::<u16>() {
-                    app.update_config(serde_json::json!({ "mixed-port": port })).await?;
+                    app.update_config(serde_json::json!({ "mixed-port": port }))
+                        .await?;
                 }
             }
             ConfigEntry::BindAddress => {
-                app.update_config(serde_json::json!({ "bind-address": app.editing_value })).await?;
+                app.update_config(serde_json::json!({ "bind-address": app.editing_value }))
+                    .await?;
             }
             ConfigEntry::BaseUrl => {
                 app.app_settings.base_url = app.editing_value.clone();
@@ -470,7 +505,5 @@ async fn commit_edit(app: &mut app::App) -> Result<()> {
 
 /// Find a non-loopback server IP
 fn find_server_ip() -> Option<String> {
-    local_ip_address::local_ip()
-        .ok()
-        .map(|ip| ip.to_string())
+    local_ip_address::local_ip().ok().map(|ip| ip.to_string())
 }

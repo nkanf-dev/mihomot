@@ -31,7 +31,10 @@ pub async fn start_server(
     });
 
     let app = Router::new()
-        .route("/mhmt/config/raw", get(get_config_raw).post(post_config_raw))
+        .route(
+            "/mhmt/config/raw",
+            get(get_config_raw).post(post_config_raw),
+        )
         .route("/mhmt/config/backup", get(get_config_backup))
         .route("/mhmt/reload", post(post_reload))
         .route("/mhmt/status", get(get_status))
@@ -126,10 +129,7 @@ async fn post_config_raw(
 }
 
 /// GET /mhmt/config/backup - Return latest backup
-async fn get_config_backup(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Response {
+async fn get_config_backup(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     if !verify_auth(&headers, &state.secret) {
         return unauthorized();
     }
@@ -158,10 +158,7 @@ async fn get_config_backup(
 }
 
 /// POST /mhmt/reload - Reload mihomo and return result
-async fn post_reload(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Response {
+async fn post_reload(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     if !verify_auth(&headers, &state.secret) {
         return unauthorized();
     }
@@ -169,10 +166,9 @@ async fn post_reload(
     match crate::mihomo::reload(&state.mihomo_endpoint, &state.secret, &state.config_path).await {
         Ok(()) => {
             // Verify connectivity
-            let alive =
-                crate::mihomo::check_alive(&state.mihomo_endpoint, &state.secret)
-                    .await
-                    .unwrap_or(false);
+            let alive = crate::mihomo::check_alive(&state.mihomo_endpoint, &state.secret)
+                .await
+                .unwrap_or(false);
             let body = serde_json::json!({
                 "reload": "ok",
                 "alive": alive,
@@ -188,10 +184,7 @@ async fn post_reload(
 }
 
 /// GET /mhmt/status - Comprehensive status
-async fn get_status(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Response {
+async fn get_status(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     if !verify_auth(&headers, &state.secret) {
         return unauthorized();
     }
@@ -234,7 +227,11 @@ async fn get_status(
                 .json::<serde_json::Value>()
                 .await
                 .ok()
-                .and_then(|v| v.get("connections").and_then(|c| c.as_array()).map(|a| a.len()))
+                .and_then(|v| {
+                    v.get("connections")
+                        .and_then(|c| c.as_array())
+                        .map(|a| a.len())
+                })
                 .unwrap_or(0),
             _ => 0,
         }
@@ -267,7 +264,10 @@ fn find_backups(config_path: &Path) -> Vec<PathBuf> {
         Some(d) => d,
         None => return vec![],
     };
-    let stem = match config_path.file_stem().map(|s| s.to_string_lossy().to_string()) {
+    let stem = match config_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+    {
         Some(s) => s,
         None => return vec![],
     };

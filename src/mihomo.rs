@@ -2,8 +2,7 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const GITHUB_RELEASE_URL: &str =
-    "https://github.com/MetaCubeX/mihomo/releases/latest/download";
+const GITHUB_RELEASE_URL: &str = "https://github.com/MetaCubeX/mihomo/releases/latest/download";
 const GHPROXY_PREFIX: &str = "https://ghproxy.com/";
 
 #[derive(Debug)]
@@ -15,7 +14,10 @@ pub enum RuntimeMode {
 /// Detect how mihomo is available: Docker container or local binary
 pub fn detect_runtime() -> Result<RuntimeMode> {
     // 1. Check if mihomo docker container is running
-    if let Ok(output) = Command::new("docker").args(["ps", "--format", "{{.Names}}"]).output() {
+    if let Ok(output) = Command::new("docker")
+        .args(["ps", "--format", "{{.Names}}"])
+        .output()
+    {
         let stdout = String::from_utf8_lossy(&output.stdout);
         for name in stdout.lines() {
             if name.trim() == "mihomo" {
@@ -67,7 +69,14 @@ pub fn start(runtime: &RuntimeMode, config_path: &Path) -> Result<()> {
         RuntimeMode::Docker { container_name } => {
             // Check if container exists but is stopped
             let ps_output = Command::new("docker")
-                .args(["ps", "-a", "--filter", &format!("name=^{}$", container_name), "--format", "{{.Status}}"])
+                .args([
+                    "ps",
+                    "-a",
+                    "--filter",
+                    &format!("name=^{}$", container_name),
+                    "--format",
+                    "{{.Status}}",
+                ])
                 .output()?;
 
             let status = String::from_utf8_lossy(&ps_output.stdout);
@@ -84,14 +93,22 @@ pub fn start(runtime: &RuntimeMode, config_path: &Path) -> Result<()> {
                     .to_string_lossy();
                 Command::new("docker")
                     .args([
-                        "run", "-d",
-                        "--name", container_name,
-                        "--network", "host",
-                        "--restart", "always",
-                        "-v", &format!("{}:/root/.config/mihomo/config.yaml", config_path.display()),
-                        "-v", &format!("{}:/root/.config/mihomo", config_dir),
-                        "--cap-add", "NET_ADMIN",
-                        "--device", "/dev/net/tun",
+                        "run",
+                        "-d",
+                        "--name",
+                        container_name,
+                        "--network",
+                        "host",
+                        "--restart",
+                        "always",
+                        "-v",
+                        &format!("{}:/root/.config/mihomo/config.yaml", config_path.display()),
+                        "-v",
+                        &format!("{}:/root/.config/mihomo", config_dir),
+                        "--cap-add",
+                        "NET_ADMIN",
+                        "--device",
+                        "/dev/net/tun",
                         "metacubex/mihomo:latest",
                     ])
                     .output()
@@ -102,7 +119,14 @@ pub fn start(runtime: &RuntimeMode, config_path: &Path) -> Result<()> {
             // Use status() to wait for process to be ready, then detach
             // mihomo daemonizes itself with -d flag, so status() returns once it forks
             Command::new(path)
-                .args(["-d", config_path.parent().unwrap_or(Path::new(".")).to_str().unwrap_or(".")])
+                .args([
+                    "-d",
+                    config_path
+                        .parent()
+                        .unwrap_or(Path::new("."))
+                        .to_str()
+                        .unwrap_or("."),
+                ])
                 .status()
                 .context("Failed to start mihomo binary")?;
         }
@@ -117,7 +141,10 @@ pub async fn reload(endpoint: &str, secret: &str, config_path: &Path) -> Result<
 
     let client = reqwest::Client::new();
     let url = format!("{}/configs?force=true", endpoint);
-    let mut req = client.put(&url).body(content).header("Content-Type", "application/yaml");
+    let mut req = client
+        .put(&url)
+        .body(content)
+        .header("Content-Type", "application/yaml");
     if !secret.is_empty() {
         req = req.bearer_auth(secret);
     }

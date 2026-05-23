@@ -43,11 +43,9 @@ pub fn read_raw(path: &Path) -> Result<String> {
 /// Write config.yaml content (raw string), returns the path
 pub fn write_raw(path: &Path, content: &str) -> Result<()> {
     // Validate it's valid YAML first
-    serde_yaml::from_str::<serde_yaml::Value>(content)
-        .context("Invalid YAML content")?;
+    serde_yaml::from_str::<serde_yaml::Value>(content).context("Invalid YAML content")?;
 
-    fs::write(path, content)
-        .with_context(|| format!("Failed to write {}", path.display()))?;
+    fs::write(path, content).with_context(|| format!("Failed to write {}", path.display()))?;
     Ok(())
 }
 
@@ -62,12 +60,8 @@ pub fn backup_config(path: &Path) -> Result<PathBuf> {
 
 /// Restore config from a backup file
 pub fn restore_from_backup(backup_path: &Path, target_path: &Path) -> Result<()> {
-    fs::copy(backup_path, target_path).with_context(|| {
-        format!(
-            "Failed to restore from {}",
-            backup_path.display()
-        )
-    })?;
+    fs::copy(backup_path, target_path)
+        .with_context(|| format!("Failed to restore from {}", backup_path.display()))?;
     Ok(())
 }
 
@@ -126,10 +120,7 @@ mod tests {
             parse_external_controller("127.0.0.1:9091"),
             ("127.0.0.1".to_string(), 9091)
         );
-        assert_eq!(
-            parse_external_controller(":9090"),
-            ("".to_string(), 9090)
-        );
+        assert_eq!(parse_external_controller(":9090"), ("".to_string(), 9090));
         assert_eq!(
             parse_external_controller("9090"),
             ("0.0.0.0".to_string(), 9090)
