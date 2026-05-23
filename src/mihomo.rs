@@ -357,8 +357,20 @@ async fn download_binary(dest: &Path) -> Result<()> {
         println!("Trying: {}", url);
         match client.get(url).send().await {
             Ok(resp) if resp.status().is_success() => {
-                let bytes = resp.bytes().await?;
-                let binary = decode_mihomo_asset(&asset.name, &bytes)?;
+                let bytes = match resp.bytes().await {
+                    Ok(bytes) => bytes,
+                    Err(err) => {
+                        last_err = Some(format!("download body error from {url}: {err}"));
+                        continue;
+                    }
+                };
+                let binary = match decode_mihomo_asset(&asset.name, &bytes) {
+                    Ok(binary) => binary,
+                    Err(err) => {
+                        last_err = Some(format!("decode error from {url}: {err:#}"));
+                        continue;
+                    }
+                };
                 std::fs::write(dest, &binary)?;
                 #[cfg(unix)]
                 {
@@ -395,15 +407,23 @@ async fn find_latest_mihomo_asset(os: &str, arch: &str) -> Result<GithubAsset> {
         .build()?;
 
     let mut last_err = None;
-    for url in github_prefixes()
-        .into_iter()
-        .map(|prefix| proxied_url(&prefix, GITHUB_API_RELEASE_URL))
-    {
+    for url in github_api_urls(GITHUB_API_RELEASE_URL) {
         println!("Trying mihomo release metadata: {}", url);
         match client.get(&url).send().await {
             Ok(resp) if resp.status().is_success() => {
-                let release = resp.json::<GithubRelease>().await?;
-                return select_mihomo_asset(release.assets, os, arch);
+                let release = match resp.json::<GithubRelease>().await {
+                    Ok(release) => release,
+                    Err(err) => {
+                        last_err = Some(format!("metadata decode error from {url}: {err}"));
+                        continue;
+                    }
+                };
+                match select_mihomo_asset(release.assets, os, arch) {
+                    Ok(asset) => return Ok(asset),
+                    Err(err) => {
+                        last_err = Some(err.to_string());
+                    }
+                }
             }
             Ok(resp) => {
                 last_err = Some(format!("HTTP {}", resp.status()));
@@ -418,6 +438,33 @@ async fn find_latest_mihomo_asset(os: &str, arch: &str) -> Result<GithubAsset> {
         "failed to read latest mihomo release metadata: {}",
         last_err.unwrap_or_else(|| "unknown".to_string())
     )
+}
+
+fn github_api_urls(source_url: &str) -> Vec<String> {
+    let mut urls = vec![source_url.to_string()];
+
+    if let Ok(proxy) = std::env::var("MIHOMOT_GITHUB_API_PROXY") {
+        let proxy = proxy.trim();
+        if proxy == "direct" {
+            return urls;
+        }
+        if !proxy.is_empty() {
+            urls.insert(0, proxied_url(proxy, source_url));
+            return urls;
+        }
+    }
+
+    if let Ok(proxy) = std::env::var("MIHOMOT_GITHUB_PROXY") {
+        let proxy = proxy.trim();
+        if proxy == "direct" {
+            return urls;
+        }
+        if !proxy.is_empty() {
+            urls.push(proxied_url(proxy, source_url));
+        }
+    }
+
+    urls
 }
 
 fn select_mihomo_asset(assets: Vec<GithubAsset>, os: &str, arch: &str) -> Result<GithubAsset> {
@@ -490,13 +537,23 @@ pub async fn ranked_github_urls(client: &reqwest::Client, source_url: &str) -> V
     let mut ranked = Vec::new();
     for url in &candidates {
         let started = Instant::now();
-        let reachable = client
-            .head(url)
+        let reachable = match client
+            .get(url)
+            .header(reqwest::header::RANGE, "bytes=0-1023")
             .timeout(Duration::from_secs(12))
             .send()
             .await
-            .map(|resp| resp.status().is_success())
-            .unwrap_or(false);
+        {
+            Ok(resp) => match resp.error_for_status() {
+                Ok(resp) => resp
+                    .bytes()
+                    .await
+                    .map(|bytes| !bytes.is_empty())
+                    .unwrap_or(false),
+                Err(_) => false,
+            },
+            Err(_) => false,
+        };
 
         if reachable {
             let elapsed = started.elapsed();

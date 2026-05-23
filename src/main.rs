@@ -933,7 +933,13 @@ async fn ensure_cloudflared(state_dir: &std::path::Path) -> Result<PathBuf> {
         println!("Trying cloudflared: {}", ranked_url);
         match client.get(&ranked_url).send().await {
             Ok(resp) if resp.status().is_success() => {
-                let bytes = resp.bytes().await?;
+                let bytes = match resp.bytes().await {
+                    Ok(bytes) => bytes,
+                    Err(err) => {
+                        last_err = Some(format!("download body error from {ranked_url}: {err}"));
+                        continue;
+                    }
+                };
                 fs::write(&bin_path, &bytes)?;
 
                 #[cfg(unix)]
