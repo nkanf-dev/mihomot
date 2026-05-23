@@ -44,10 +44,10 @@ need_cmd() {
 detect_target() {
   case "$(uname -m)" in
     x86_64 | amd64)
-      printf '%s\n' "x86_64-unknown-linux-gnu"
+      printf '%s\n' "x86_64-unknown-linux-musl"
       ;;
     aarch64 | arm64)
-      printf '%s\n' "aarch64-unknown-linux-gnu"
+      printf '%s\n' "aarch64-unknown-linux-musl"
       ;;
     *)
       die "unsupported architecture: $(uname -m)"

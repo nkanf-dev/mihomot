@@ -13,7 +13,7 @@ futures-util = "0.3.31"
 hostname = "0.4"
 local-ip-address = "0.6"
 ratatui = "0.29.0"
-reqwest = { version = "0.12.28", features = ["json", "stream"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["charset", "http2", "json", "rustls-tls", "stream"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.147"
 serde_yaml = "0.9"
