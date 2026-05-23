@@ -155,7 +155,7 @@ All `/mhmt/` endpoints require auth: `Authorization: Bearer {secret}` (same secr
 | GET | `/mhmt/status` | Status: version, mode, connection count |
 | GET | `/skill.md` | AI agent skill document |
 
-Mihomo native API endpoints (`/proxies`, `/rules`, `/configs`, etc.) are called directly by the agent, not proxied through mihomot.
+Mihomo native API endpoints (`/proxies`, `/rules`, `/configs`, etc.) can be called through the same mihomot address. Unknown non-`/mhmt/` paths are proxied to mihomo with the same bearer token.
 
 ## Token Format
 

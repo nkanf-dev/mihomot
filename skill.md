@@ -42,7 +42,7 @@
 
 ### 3.2 mihomo 原生 API（运行时操作）
 
-直接调用 mihomo API，不经过 mihomot：
+可以直接向同一个 mihomot endpoint 调用 mihomo 原生 API。mihomot 会把非 `/mhmt/` 路径透传给 mihomo：
 
 | 端点 | 方法 | 用途 |
 |------|------|------|
@@ -54,13 +54,13 @@
 | `/connections` | GET | 查看活跃连接 |
 | `/version` | GET | 获取内核版本 |
 
-mihomo API 的 endpoint 和 secret 与 mihomot 相同（同一台服务器）。
+mihomo API 的 endpoint 和 secret 与 mihomot 相同。高级场景下也可以直连 mihomo 的 `external-controller`。
 
 ## 4. 操作流程
 
 ### 4.1 运行时操作（切节点、换模式、更新订阅）
 
-直接调 mihomo 原生 API：
+直接调 mihomo 原生 API（可通过 mihomot endpoint 透传）：
 
 ```
 切换代理组节点：PUT /proxies/{group_name}  body: {"name": "节点名"}

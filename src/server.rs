@@ -1,9 +1,10 @@
 use axum::{
     Router,
-    extract::State,
-    http::{HeaderMap, StatusCode},
+    body::Bytes,
+    extract::{OriginalUri, Path as AxumPath, State},
+    http::{HeaderMap, Method, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{any, get, post},
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -39,6 +40,7 @@ pub async fn start_server(
         .route("/mhmt/reload", post(post_reload))
         .route("/mhmt/status", get(get_status))
         .route("/skill.md", get(get_skill_md))
+        .route("/{*path}", any(proxy_mihomo_native))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(listen_addr).await?;
@@ -256,6 +258,75 @@ async fn get_skill_md() -> impl IntoResponse {
         [("Content-Type", "text/markdown; charset=utf-8")],
         skill,
     )
+}
+
+/// Forward non-mihomot paths to the native mihomo API.
+async fn proxy_mihomo_native(
+    State(state): State<Arc<AppState>>,
+    OriginalUri(original_uri): OriginalUri,
+    method: Method,
+    headers: HeaderMap,
+    AxumPath(path): AxumPath<String>,
+    body: Bytes,
+) -> Response {
+    if !verify_auth(&headers, &state.secret) {
+        return unauthorized();
+    }
+
+    let path = path.trim_start_matches('/');
+    if path == "mhmt" || path.starts_with("mhmt/") {
+        return (StatusCode::NOT_FOUND, "Unknown mihomot endpoint").into_response();
+    }
+
+    let mut url = format!("{}/{}", state.mihomo_endpoint.trim_end_matches('/'), path);
+    if let Some(query) = original_uri.query() {
+        url.push('?');
+        url.push_str(query);
+    }
+
+    let client = reqwest::Client::new();
+    let req_method = match reqwest::Method::from_bytes(method.as_str().as_bytes()) {
+        Ok(method) => method,
+        Err(_) => return (StatusCode::METHOD_NOT_ALLOWED, "Unsupported method").into_response(),
+    };
+    let mut req = client.request(req_method, url);
+
+    if !state.secret.is_empty() {
+        req = req.bearer_auth(&state.secret);
+    }
+
+    if let Some(content_type) = headers.get(header::CONTENT_TYPE) {
+        req = req.header(header::CONTENT_TYPE.as_str(), content_type.clone());
+    }
+    if !body.is_empty() {
+        req = req.body(body);
+    }
+
+    match req.send().await {
+        Ok(resp) => {
+            let status = StatusCode::from_u16(resp.status().as_u16())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let content_type = resp
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            let bytes = resp.bytes().await.unwrap_or_default();
+
+            let mut response = (status, bytes).into_response();
+            if let Some(content_type) = content_type
+                && let Ok(value) = content_type.parse()
+            {
+                response.headers_mut().insert(header::CONTENT_TYPE, value);
+            }
+            response
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            format!("Failed to proxy mihomo API: {}", e),
+        )
+            .into_response(),
+    }
 }
 
 /// Find backup files sorted by name (newest first)

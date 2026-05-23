@@ -154,26 +154,52 @@ pub fn start(runtime: &RuntimeMode, config_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Trigger mihomo reload via its API (PATCH /configs)
+/// Trigger mihomo reload via its API (PUT /configs?force=true)
 pub async fn reload(endpoint: &str, secret: &str, config_path: &Path) -> Result<()> {
     let content = std::fs::read_to_string(config_path)
         .with_context(|| format!("Failed to read {}", config_path.display()))?;
-
     let client = reqwest::Client::new();
     let url = format!("{}/configs?force=true", endpoint);
-    let mut req = client
-        .put(&url)
-        .body(content)
-        .header("Content-Type", "application/yaml");
-    if !secret.is_empty() {
-        req = req.bearer_auth(secret);
+
+    let mut bodies = mihomo_config_paths(config_path)
+        .into_iter()
+        .map(|path| serde_json::json!({ "path": path }))
+        .collect::<Vec<_>>();
+    bodies.push(serde_json::json!({ "payload": content }));
+
+    let mut last_err = None;
+    for body in bodies {
+        let mut req = client.put(&url).json(&body);
+        if !secret.is_empty() {
+            req = req.bearer_auth(secret);
+        }
+        match req.send().await {
+            Ok(resp) if resp.status().is_success() => return Ok(()),
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                last_err = Some(format!("HTTP {}: {}", status, body));
+            }
+            Err(e) => {
+                last_err = Some(e.to_string());
+            }
+        }
     }
-    let resp = req.send().await.context("Failed to reach mihomo API")?;
-    if !resp.status().is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("mihomo reload failed: {}", body);
+
+    anyhow::bail!(
+        "mihomo reload failed: {}",
+        last_err.unwrap_or_else(|| "unknown error".to_string())
+    )
+}
+
+fn mihomo_config_paths(config_path: &Path) -> Vec<String> {
+    let host_path = config_path.to_string_lossy().to_string();
+    // Docker mode mounts the host config file at this path in the container.
+    if has_docker_container("mihomo") {
+        vec!["/root/.config/mihomo/config.yaml".to_string(), host_path]
+    } else {
+        vec![host_path]
     }
-    Ok(())
 }
 
 fn local_binary_path() -> PathBuf {
@@ -223,6 +249,25 @@ fn has_docker() -> bool {
         .arg("--version")
         .output()
         .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn has_docker_container(name: &str) -> bool {
+    Command::new("docker")
+        .args([
+            "ps",
+            "-a",
+            "--filter",
+            &format!("name=^{}$", name),
+            "--format",
+            "{{.Names}}",
+        ])
+        .output()
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line.trim() == name)
+        })
         .unwrap_or(false)
 }
 
