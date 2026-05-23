@@ -1,6 +1,10 @@
 use anyhow::Result;
 use app::ConfigEntry;
 use clap::{Parser, Subcommand};
+use std::fs::{self, OpenOptions};
+use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 
 mod app;
 mod config;
@@ -45,6 +49,15 @@ enum Commands {
         #[arg(short, long)]
         port: Option<u16>,
     },
+    /// Start a temporary Cloudflare Tunnel for the mihomot API
+    Tunnel {
+        /// Local mihomot API URL to expose
+        #[arg(short = 'U', long, default_value = "http://127.0.0.1:9091")]
+        url: String,
+        /// Config file path for reading the mihomo secret
+        #[arg(short, long)]
+        config: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -83,6 +96,7 @@ async fn main() -> Result<()> {
             };
             run_tui(url, secret, config).await
         }
+        Commands::Tunnel { url, config } => run_tunnel(url, config).await,
     }
 }
 
@@ -556,6 +570,70 @@ fn find_server_ip() -> Option<String> {
     local_ip_address::local_ip().ok().map(|ip| ip.to_string())
 }
 
+async fn run_tunnel(local_url: String, config_override: Option<String>) -> Result<()> {
+    let state_dir = mihomot_state_dir()?;
+    fs::create_dir_all(&state_dir)?;
+
+    let pid_path = state_dir.join("cloudflared.pid");
+    let url_path = state_dir.join("cloudflared.url");
+    let log_path = state_dir.join("cloudflared.log");
+    let secret = read_secret_for_tunnel(config_override);
+
+    if let Ok(pid_text) = fs::read_to_string(&pid_path)
+        && let Ok(pid) = pid_text.trim().parse::<u32>()
+        && process_is_running(pid)
+        && let Ok(url) = fs::read_to_string(&url_path)
+    {
+        let url = url.trim().to_string();
+        if !url.is_empty() {
+            println!("Reusing existing Cloudflare Tunnel (pid {}).", pid);
+            print_agent_block(
+                &url,
+                &secret,
+                Some(
+                    "这是临时 Cloudflare Tunnel 入口；只要后台 cloudflared 进程还在，该 endpoint 通常可继续使用。进程停止或重启后该 endpoint 会失效，需要重新运行 mihomot tunnel 并把新的 endpoint 发给 agent。",
+                ),
+            );
+            println!("cloudflared pid: {}", pid);
+            println!("cloudflared log: {}", log_path.display());
+            println!("stop tunnel: kill {}", pid);
+            return Ok(());
+        }
+    }
+
+    let cloudflared = ensure_cloudflared(&state_dir).await?;
+    let log_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+    let err_file = log_file.try_clone()?;
+
+    let child = Command::new(&cloudflared)
+        .args(["tunnel", "--url", &local_url])
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(err_file))
+        .spawn()?;
+    let pid = child.id();
+    fs::write(&pid_path, pid.to_string())?;
+
+    let tunnel_url = wait_for_tunnel_url(&log_path).await?;
+    fs::write(&url_path, &tunnel_url)?;
+
+    println!("Started temporary Cloudflare Tunnel in the background.");
+    print_agent_block(
+        &tunnel_url,
+        &secret,
+        Some(
+            "这是临时 Cloudflare Tunnel 入口；不需要开放 9091 端口，但 cloudflared 进程停止或重启后该 endpoint 会失效，需要重新运行 mihomot tunnel 并把新的 endpoint 发给 agent。",
+        ),
+    );
+    println!("cloudflared pid: {}", pid);
+    println!("cloudflared log: {}", log_path.display());
+    println!("stop tunnel: kill {}", pid);
+
+    Ok(())
+}
+
 fn parse_listen_addr(listen: &str) -> (String, u16) {
     let default_host = "0.0.0.0".to_string();
     let default_port = 9091;
@@ -595,9 +673,132 @@ async fn detect_public_ip() -> Option<String> {
     None
 }
 
+fn mihomot_state_dir() -> Result<PathBuf> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    Ok(PathBuf::from(home).join(".config").join("mihomot"))
+}
+
+fn process_is_running(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn read_secret_for_tunnel(config_override: Option<String>) -> String {
+    let config_path = config_override
+        .map(PathBuf::from)
+        .unwrap_or_else(config::default_config_path);
+    config::read_config(&config_path)
+        .ok()
+        .and_then(|config| config.secret)
+        .or_else(|| std::env::var("MIHOMO_SECRET").ok())
+        .unwrap_or_default()
+}
+
+async fn ensure_cloudflared(state_dir: &std::path::Path) -> Result<PathBuf> {
+    if let Ok(output) = Command::new("which").arg("cloudflared").output()
+        && output.status.success()
+    {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path.is_empty() {
+            return Ok(PathBuf::from(path));
+        }
+    }
+
+    let target = cloudflared_target()?;
+    let bin_path = state_dir.join("cloudflared");
+    println!("cloudflared not found; downloading {}...", target);
+
+    let url = format!(
+        "https://github.com/cloudflare/cloudflared/releases/latest/download/{}",
+        target
+    );
+    let bytes = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()?
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+    fs::write(&bin_path, &bytes)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&bin_path, fs::Permissions::from_mode(0o755))?;
+    }
+
+    Ok(bin_path)
+}
+
+fn cloudflared_target() -> Result<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => Ok("cloudflared-linux-amd64"),
+        ("linux", "aarch64") => Ok("cloudflared-linux-arm64"),
+        (os, arch) => anyhow::bail!("unsupported cloudflared platform: {os}/{arch}"),
+    }
+}
+
+async fn wait_for_tunnel_url(log_path: &std::path::Path) -> Result<String> {
+    for _ in 0..30 {
+        if let Ok(file) = fs::File::open(log_path) {
+            let reader = BufReader::new(file);
+            for line in reader.lines().map_while(Result::ok) {
+                if let Some(url) = extract_trycloudflare_url(&line) {
+                    return Ok(url);
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
+    anyhow::bail!(
+        "timed out waiting for cloudflared tunnel URL; see {}",
+        log_path.display()
+    )
+}
+
+fn extract_trycloudflare_url(line: &str) -> Option<String> {
+    line.split_whitespace()
+        .find(|part| part.starts_with("https://") && part.contains(".trycloudflare.com"))
+        .map(|part| {
+            part.trim_matches(|c: char| c == '"' || c == '\'' || c == ',' || c == '.')
+                .to_string()
+        })
+}
+
+fn print_agent_block(endpoint: &str, secret: &str, note: Option<&str>) {
+    let token_str =
+        token::generate_token(secret).unwrap_or_else(|_| "TOKEN_GENERATION_FAILED".into());
+
+    println!();
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("把这段话发给你的 AI agent:");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!();
+    println!("我已安装 mihomot，请帮我管理我这个服务器的代理。");
+    println!("mihomot endpoint: {}", endpoint);
+    println!(
+        "如果没有安装skill先安装这个skill: {}",
+        mihomo::skill_install_url()
+    );
+    println!("token: {}", token_str);
+    if let Some(note) = note {
+        println!();
+        println!("临时入口提示: {}", note);
+    }
+    println!();
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!();
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_listen_addr;
+    use super::{extract_trycloudflare_url, parse_listen_addr};
 
     #[test]
     fn parse_listen_addr_handles_host_port_and_port_only() {
@@ -611,5 +812,14 @@ mod tests {
         );
         assert_eq!(parse_listen_addr("7070"), ("0.0.0.0".to_string(), 7070));
         assert_eq!(parse_listen_addr("[::]:9091"), ("::".to_string(), 9091));
+    }
+
+    #[test]
+    fn extract_trycloudflare_url_from_cloudflared_log_line() {
+        let line = r#"INF | https://quiet-river-123.trycloudflare.com |"#;
+        assert_eq!(
+            extract_trycloudflare_url(line).as_deref(),
+            Some("https://quiet-river-123.trycloudflare.com")
+        );
     }
 }

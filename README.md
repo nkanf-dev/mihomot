@@ -176,6 +176,16 @@ mihomot tui -c /etc/mihomo/config.yaml   # server install config
 
 The install and upgrade scripts write `~/.config/mihomot/settings.json` for the user running the script (or `SUDO_USER`) with the local API URL and secret, so `mihomot tui` works even when `/etc/mihomo/config.yaml` is root-readable only.
 
+### Temporary Tunnel
+
+If opening TCP `9091` is inconvenient, start a temporary Cloudflare Tunnel:
+
+```bash
+mihomot tunnel
+```
+
+`mihomot tunnel` installs `cloudflared` into `~/.config/mihomot` when it is not already available, starts it in the background, reuses an existing tunnel on the next run, and prints an agent message with a `https://*.trycloudflare.com` endpoint. The endpoint is temporary: it remains useful only while the background `cloudflared` process is alive.
+
 ## HTTP API
 
 mihomot exposes an HTTP API for config.yaml operations that mihomo's native API doesn't cover.
