@@ -1,0 +1,125 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag, for example v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN_NAME: mihomot
+
+jobs:
+  prepare:
+    name: Prepare release
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+    steps:
+      - name: Resolve tag
+        id: release
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tags must look like v1.2.3 or v1.2.3-rc.1" >&2
+            exit 1
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [[ "$tag" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Test
+        run: cargo test --locked --verbose
+
+      - name: Build release binary
+        run: cargo build --locked --release --verbose
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${{ needs.prepare.outputs.tag }}"
+          target="${{ matrix.target }}"
+          package="${BIN_NAME}-${tag}-${target}"
+
+          mkdir -p "dist/$package"
+          cp "target/release/${BIN_NAME}" "dist/$package/"
+          cp README.md LICENSE skill.md "dist/$package/"
+
+          tar -C dist -czf "${package}.tar.gz" "$package"
+          sha256sum "${package}.tar.gz" > "${package}.tar.gz.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BIN_NAME }}-${{ needs.prepare.outputs.tag }}-${{ matrix.target }}
+          path: |
+            *.tar.gz
+            *.tar.gz.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs:
+      - prepare
+      - build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ${{ env.BIN_NAME }}-${{ needs.prepare.outputs.tag }}-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: ${{ needs.prepare.outputs.tag }}
+          prerelease: ${{ needs.prepare.outputs.prerelease }}
+          files: dist/*
