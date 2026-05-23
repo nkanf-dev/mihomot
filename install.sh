@@ -7,6 +7,8 @@ INSTALL_DIR="${MIHOMOT_INSTALL_DIR:-/usr/local/bin}"
 CONFIG_PATH="${MIHOMOT_CONFIG:-/etc/mihomo/config.yaml}"
 SERVICE_NAME="${MIHOMOT_SERVICE_NAME:-mihomot}"
 DETECTED_REGION="${MIHOMOT_REGION:-}"
+STATE_DIR="${MIHOMOT_STATE_DIR:-/etc/mihomot}"
+RESOLVED_BACKUP_DIR="${STATE_DIR}/resolved-backup"
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -313,6 +315,16 @@ install_resolved_dns() {
   resolved_dir="/etc/systemd/resolved.conf.d"
   resolved_file="${resolved_dir}/mihomot.conf"
   tmp_resolved="$TMP_DIR/mihomot-resolved.conf"
+
+  if ! as_root test -e "${RESOLVED_BACKUP_DIR}/.mihomot-backup"; then
+    info "backing up systemd-resolved drop-ins to ${RESOLVED_BACKUP_DIR}"
+    as_root rm -rf "$RESOLVED_BACKUP_DIR"
+    as_root mkdir -p "$RESOLVED_BACKUP_DIR"
+    if as_root test -d "$resolved_dir"; then
+      as_root sh -c "cp -a '${resolved_dir}/.' '${RESOLVED_BACKUP_DIR}/' 2>/dev/null || true"
+    fi
+    as_root sh -c "date -u +%Y-%m-%dT%H:%M:%SZ > '${RESOLVED_BACKUP_DIR}/.mihomot-backup'"
+  fi
 
   cat > "$tmp_resolved" <<EOF
 [Resolve]

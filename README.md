@@ -204,7 +204,9 @@ Set `MIHOMOT_NO_RESOLVED=1` to leave systemd-resolved unchanged during installat
 
 The generated default config enables TUN, listens for DNS on `127.0.0.1:53`, routes LAN/CN traffic directly, and sends other traffic through the `Proxy` group. It excludes local, private, carrier-grade NAT, link-local, multicast, and reserved address ranges from TUN routing so SSH and server management traffic remain direct.
 
-The installer writes `/etc/systemd/resolved.conf.d/mihomot.conf` so system DNS queries go through mihomo and fake-ip routing can work by default. It also pre-downloads `Country.mmdb` into the mihomo config directory so the default `GEOIP,CN,DIRECT,no-resolve` rule can work on first start. `uninstall.sh --purge` removes the systemd-resolved drop-in.
+The installer backs up existing systemd-resolved drop-ins to `/etc/mihomot/resolved-backup` before writing `/etc/systemd/resolved.conf.d/mihomot.conf`, so system DNS queries go through mihomo and fake-ip routing can work by default. It also pre-downloads `Country.mmdb` into the mihomo config directory so the default `GEOIP,CN,DIRECT,no-resolve` rule can work on first start.
+
+`uninstall.sh --purge` restores the saved systemd-resolved drop-ins. If no backup is available, it installs a fallback DNS drop-in with `223.5.5.5`, `119.29.29.29`, `8.8.8.8`, and `1.1.1.1` so uninstall does not leave the host unable to resolve names.
 
 ## Multi-Server
 
