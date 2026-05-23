@@ -110,35 +110,6 @@ pub fn start(runtime: &RuntimeMode, config_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Stop mihomo
-pub fn stop(runtime: &RuntimeMode) -> Result<()> {
-    match runtime {
-        RuntimeMode::Docker { container_name } => {
-            Command::new("docker")
-                .args(["stop", container_name])
-                .output()
-                .context("Failed to stop docker container")?;
-        }
-        RuntimeMode::Binary { .. } => {
-            // Try to kill mihomo process
-            Command::new("pkill")
-                .args(["-f", "mihomo"])
-                .output()
-                .ok();
-        }
-    }
-    Ok(())
-}
-
-/// Restart mihomo
-pub fn restart(runtime: &RuntimeMode, config_path: &Path) -> Result<()> {
-    stop(runtime)?;
-    // Small delay for port release
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    start(runtime, config_path)?;
-    Ok(())
-}
-
 /// Trigger mihomo reload via its API (PATCH /configs)
 pub async fn reload(endpoint: &str, secret: &str, config_path: &Path) -> Result<()> {
     let content = std::fs::read_to_string(config_path)

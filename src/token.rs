@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg(test)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ServerInfo {
     pub alias: String,
     pub endpoint: String,
@@ -27,7 +27,8 @@ pub fn generate_token(secret: &str) -> Result<String> {
 /// Parse a mihomot token back into its components.
 /// `mihomot_addr` is the mihomot server address the agent connected to,
 /// used as the endpoint since the real address may not be in the token (NAT).
-pub fn parse_token(token: &str, mihomot_addr: &str) -> Result<ServerInfo> {
+#[cfg(test)]
+fn parse_token(token: &str, mihomot_addr: &str) -> Result<ServerInfo> {
     let rest = token
         .strip_prefix("mhmt_")
         .context("Token does not start with 'mhmt_'")?;
@@ -60,38 +61,8 @@ pub fn save_token(token: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Load saved servers from ~/.mihomot/servers.json
-pub fn load_servers() -> Result<Vec<ServerInfo>> {
-    let path = servers_path();
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let content = fs::read_to_string(&path)?;
-    let servers: Vec<ServerInfo> = serde_json::from_str(&content)?;
-    Ok(servers)
-}
-
-/// Append a server to ~/.mihomot/servers.json
-pub fn save_server(info: &ServerInfo) -> Result<()> {
-    let path = servers_path();
-    fs::create_dir_all(path.parent().unwrap())?;
-
-    let mut servers = load_servers().unwrap_or_default();
-    // Replace if alias already exists
-    servers.retain(|s| s.alias != info.alias);
-    servers.push(info.clone());
-
-    let json = serde_json::to_string_pretty(&servers)?;
-    fs::write(&path, json)?;
-    Ok(())
-}
-
 fn config_dir() -> PathBuf {
     dirs_or_default().join(".config").join("mihomot")
-}
-
-fn servers_path() -> PathBuf {
-    dirs_or_default().join(".mihomot").join("servers.json")
 }
 
 fn dirs_or_default() -> PathBuf {
