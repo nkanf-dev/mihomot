@@ -477,6 +477,31 @@ EOF
   fi
 }
 
+print_agent_instructions() {
+  if ! has_cmd journalctl || ! has_cmd systemctl || [ ! -d /run/systemd/system ]; then
+    return
+  fi
+
+  info "waiting for mihomot agent instructions"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if as_root journalctl -u "${SERVICE_NAME}.service" -n 120 --no-pager \
+      | awk '
+        /━━━━━━━━/ && !capture {last_sep=$0}
+        /把这段话发给你的 AI agent:/ {if (last_sep) print last_sep; capture=1; seen=1}
+        capture {print}
+        capture && /token:/ {token=1}
+        capture && token && /━━━━━━━━/ {exit}
+        END {exit seen ? 0 : 1}
+      '; then
+      return
+    fi
+    sleep 1
+  done
+
+  warn "could not find agent instructions in journal yet"
+  printf 'View them with: sudo journalctl -u %s -n 120 --no-pager\n' "$SERVICE_NAME"
+}
+
 main() {
   [ "$(uname -s)" = "Linux" ] || die "install.sh only supports Linux"
 
@@ -537,11 +562,8 @@ main() {
   install_tui_settings
 
   info "mihomot installed successfully"
-  printf '\nNext steps:\n'
-  printf '  systemctl status %s\n' "$SERVICE_NAME"
-  printf '  sudo journalctl -u %s -f\n' "$SERVICE_NAME"
-  printf '\nIf mihomot is still pulling the mihomo Docker image, wait until it finishes.\n'
-  printf 'Then copy the token printed in the logs and send it to your AI agent.\n'
+  print_agent_instructions
+  printf '\nStatus: systemctl status %s\n' "$SERVICE_NAME"
 }
 
 main "$@"
