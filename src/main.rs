@@ -110,9 +110,16 @@ async fn run_serve(config_override: Option<String>, listen: String) -> Result<()
     );
     let secret = mihomo_config.secret.unwrap_or_default();
 
-    // Determine the reachable endpoint for the token
+    let (listen_host, listen_port) = parse_listen_addr(&listen);
+    let public_ip = detect_public_ip().await;
+    let server_host = public_ip
+        .clone()
+        .or_else(find_server_ip)
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    let agent_endpoint = format!("http://{}:{}", server_host, listen_port);
+
+    // Determine the reachable mihomo endpoint for the local mihomot process.
     let mihomo_endpoint = {
-        // Try to find a non-loopback IP for the token
         let ip = find_server_ip().unwrap_or_else(|| "127.0.0.1".to_string());
         let bind_host = if host == "0.0.0.0" || host == "::" {
             &ip
@@ -132,12 +139,34 @@ async fn run_serve(config_override: Option<String>, listen: String) -> Result<()
     println!("把这段话发给你的 AI agent:");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!();
-    println!("我已安装 mihomot，请帮我管理我这个服务器的代理。");
+    println!(
+        "我已安装 mihomot，请帮我管理我这个服务器({})的代理。",
+        server_host
+    );
+    println!("mihomot endpoint: {}", agent_endpoint);
     println!(
         "如果没有安装skill先安装这个skill: {}",
         mihomo::skill_install_url()
     );
     println!("token: {}", token_str);
+    println!();
+    println!("提示:");
+    println!("  1. 请确认服务器防火墙/安全组已开放 TCP {}。", listen_port);
+    if public_ip.is_none() {
+        println!(
+            "  2. 未能自动获取公网 IP；如果上面的 endpoint 不是 agent 可访问地址，请把它改成公网 IP/域名后再发送。"
+        );
+    } else {
+        println!(
+            "  2. 如果上面的 endpoint 不是 agent 可访问地址，请改成正确的公网 IP/域名后再发送。"
+        );
+    }
+    if listen_host == "127.0.0.1" || listen_host == "::1" || listen_host == "localhost" {
+        println!(
+            "  3. 当前 mihomot 只监听 {}，远程 agent 可能无法访问；需要远程管理时请监听 0.0.0.0:{}。",
+            listen_host, listen_port
+        );
+    }
     println!();
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!();
@@ -509,4 +538,62 @@ async fn commit_edit(app: &mut app::App) -> Result<()> {
 /// Find a non-loopback server IP
 fn find_server_ip() -> Option<String> {
     local_ip_address::local_ip().ok().map(|ip| ip.to_string())
+}
+
+fn parse_listen_addr(listen: &str) -> (String, u16) {
+    let default_host = "0.0.0.0".to_string();
+    let default_port = 9091;
+
+    if let Some((host, port)) = listen.rsplit_once(':') {
+        return (
+            host.trim_matches(['[', ']']).to_string(),
+            port.parse().unwrap_or(default_port),
+        );
+    }
+
+    (default_host, listen.parse().unwrap_or(default_port))
+}
+
+async fn detect_public_ip() -> Option<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .ok()?;
+
+    for url in [
+        "https://api.ipify.org",
+        "https://ifconfig.me/ip",
+        "https://icanhazip.com",
+    ] {
+        if let Ok(resp) = client.get(url).send().await
+            && resp.status().is_success()
+            && let Ok(text) = resp.text().await
+        {
+            let ip = text.trim();
+            if ip.parse::<std::net::IpAddr>().is_ok() {
+                return Some(ip.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_listen_addr;
+
+    #[test]
+    fn parse_listen_addr_handles_host_port_and_port_only() {
+        assert_eq!(
+            parse_listen_addr("0.0.0.0:9091"),
+            ("0.0.0.0".to_string(), 9091)
+        );
+        assert_eq!(
+            parse_listen_addr("127.0.0.1:8080"),
+            ("127.0.0.1".to_string(), 8080)
+        );
+        assert_eq!(parse_listen_addr("7070"), ("0.0.0.0".to_string(), 7070));
+        assert_eq!(parse_listen_addr("[::]:9091"), ("::".to_string(), 9091));
+    }
 }
