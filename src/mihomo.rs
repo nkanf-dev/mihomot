@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use flate2::read::GzDecoder;
+use futures_util::StreamExt;
 use serde::Deserialize;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -357,7 +358,7 @@ async fn download_binary(dest: &Path) -> Result<()> {
         println!("Trying: {}", url);
         match client.get(url).send().await {
             Ok(resp) if resp.status().is_success() => {
-                let bytes = match resp.bytes().await {
+                let bytes = match download_response_with_progress(resp, "mihomo").await {
                     Ok(bytes) => bytes,
                     Err(err) => {
                         last_err = Some(format!("download body error from {url}: {err}"));
@@ -607,6 +608,63 @@ fn proxied_url(prefix: &str, source_url: &str) -> String {
         source_url.to_string()
     } else {
         format!("{}{}", prefix, source_url)
+    }
+}
+
+pub async fn download_response_with_progress(
+    resp: reqwest::Response,
+    label: &str,
+) -> Result<Vec<u8>> {
+    let total = resp.content_length();
+    let mut stream = resp.bytes_stream();
+    let mut bytes = Vec::new();
+    let mut downloaded = 0u64;
+    let started = Instant::now();
+    let mut last_print = Instant::now()
+        .checked_sub(Duration::from_secs(1))
+        .unwrap_or_else(Instant::now);
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        downloaded += chunk.len() as u64;
+        bytes.extend_from_slice(&chunk);
+
+        if last_print.elapsed() >= Duration::from_millis(500) {
+            print_download_progress(label, downloaded, total, started);
+            last_print = Instant::now();
+        }
+    }
+
+    print_download_progress(label, downloaded, total, started);
+    println!();
+
+    Ok(bytes)
+}
+
+fn print_download_progress(label: &str, downloaded: u64, total: Option<u64>, started: Instant) {
+    let elapsed = started.elapsed().as_secs_f64().max(0.001);
+    let downloaded_mb = downloaded as f64 / 1024.0 / 1024.0;
+    let speed_mb = downloaded_mb / elapsed;
+
+    if let Some(total) = total {
+        let total_mb = total as f64 / 1024.0 / 1024.0;
+        let percent = if total == 0 {
+            100.0
+        } else {
+            downloaded as f64 * 100.0 / total as f64
+        };
+        eprint!(
+            "\rDownloading {label}: {:>5.1}% ({:.1}/{:.1} MiB, {:.1} MiB/s)",
+            percent.min(100.0),
+            downloaded_mb,
+            total_mb,
+            speed_mb
+        );
+    } else {
+        eprint!(
+            "\rDownloading {label}: {:.1} MiB ({:.1} MiB/s)",
+            downloaded_mb, speed_mb
+        );
     }
 }
 

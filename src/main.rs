@@ -136,12 +136,6 @@ async fn run_serve(config_override: Option<String>, listen: String) -> Result<()
     let secret = mihomo_config.secret.unwrap_or_default();
 
     let (listen_host, listen_port) = parse_listen_addr(&listen);
-    let public_ip = detect_public_ip().await;
-    let server_host = public_ip
-        .clone()
-        .or_else(find_server_ip)
-        .unwrap_or_else(|| "127.0.0.1".to_string());
-    let agent_endpoint = format!("http://{}:{}", server_host, listen_port);
 
     // Determine the reachable mihomo endpoint for the local mihomot process.
     let mihomo_endpoint = {
@@ -158,52 +152,14 @@ async fn run_serve(config_override: Option<String>, listen: String) -> Result<()
     let token_str = token::generate_token(&secret)?;
     token::save_token(&token_str).ok(); // best-effort
 
-    // Print startup message
-    println!();
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("把这段话发给你的 AI agent:");
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!();
-    println!(
-        "我已安装 mihomot，请帮我管理我这个服务器({})的代理。",
-        server_host
-    );
-    println!("mihomot endpoint: {}", agent_endpoint);
-    println!(
-        "如果没有安装skill先安装这个skill: {}",
-        mihomo::skill_install_url()
-    );
-    println!("token: {}", token_str);
-    println!();
-    println!("提示:");
-    println!("  1. 请确认服务器防火墙/安全组已开放 TCP {}。", listen_port);
-    if public_ip.is_none() {
-        println!(
-            "  2. 未能自动获取公网 IP；如果上面的 endpoint 不是 agent 可访问地址，请把它改成公网 IP/域名后再发送。"
-        );
-    } else {
-        println!(
-            "  2. 如果上面的 endpoint 不是 agent 可访问地址，请改成正确的公网 IP/域名后再发送。"
-        );
-    }
-    if listen_host == "127.0.0.1" || listen_host == "::1" || listen_host == "localhost" {
-        println!(
-            "  3. 当前 mihomot 只监听 {}，远程 agent 可能无法访问；需要远程管理时请监听 0.0.0.0:{}。",
-            listen_host, listen_port
-        );
-    }
-    println!();
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!();
-
     // Ensure mihomo is available (detect or auto-install)
     let runtime = mihomo::ensure_mihomo(&config_path).await?;
     println!("mihomo runtime: {:?}", runtime);
 
-    if !mihomo::check_alive(&mihomo_endpoint, &secret)
+    let mut mihomo_ready = mihomo::check_alive(&mihomo_endpoint, &secret)
         .await
-        .unwrap_or(false)
-    {
+        .unwrap_or(false);
+    if !mihomo_ready {
         println!("mihomo is not responding, attempting to start...");
         if let Err(e) = mihomo::start(&runtime, &config_path) {
             eprintln!("Failed to start mihomo: {}", e);
@@ -216,10 +172,19 @@ async fn run_serve(config_override: Option<String>, listen: String) -> Result<()
                     .unwrap_or(false)
                 {
                     println!("mihomo started successfully.");
+                    mihomo_ready = true;
                     break;
                 }
             }
         }
+    }
+
+    if mihomo_ready {
+        print_startup_agent_block(&token_str, listen_host, listen_port).await;
+    } else {
+        eprintln!(
+            "mihomo is still not responding; agent instructions will be printed after it is healthy."
+        );
     }
 
     // Start HTTP API server
@@ -683,6 +648,52 @@ fn parse_listen_addr(listen: &str) -> (String, u16) {
     (default_host, listen.parse().unwrap_or(default_port))
 }
 
+async fn print_startup_agent_block(token_str: &str, listen_host: String, listen_port: u16) {
+    let public_ip = detect_public_ip().await;
+    let server_host = public_ip
+        .clone()
+        .or_else(find_server_ip)
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    let agent_endpoint = format!("http://{}:{}", server_host, listen_port);
+
+    println!();
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("把这段话发给你的 AI agent:");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!();
+    println!(
+        "我已安装 mihomot，请帮我管理我这个服务器({})的代理。",
+        server_host
+    );
+    println!("mihomot endpoint: {}", agent_endpoint);
+    println!(
+        "如果没有安装skill先安装这个skill: {}",
+        mihomo::skill_install_url()
+    );
+    println!("token: {}", token_str);
+    println!();
+    println!("提示:");
+    println!("  1. 请确认服务器防火墙/安全组已开放 TCP {}。", listen_port);
+    if public_ip.is_none() {
+        println!(
+            "  2. 未能自动获取公网 IP；如果上面的 endpoint 不是 agent 可访问地址，请把它改成公网 IP/域名后再发送。"
+        );
+    } else {
+        println!(
+            "  2. 如果上面的 endpoint 不是 agent 可访问地址，请改成正确的公网 IP/域名后再发送。"
+        );
+    }
+    if listen_host == "127.0.0.1" || listen_host == "::1" || listen_host == "localhost" {
+        println!(
+            "  3. 当前 mihomot 只监听 {}，远程 agent 可能无法访问；需要远程管理时请监听 0.0.0.0:{}。",
+            listen_host, listen_port
+        );
+    }
+    println!();
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!();
+}
+
 async fn detect_public_ip() -> Option<String> {
     if let Some(ip) = detect_interface_public_ip() {
         return Some(ip);
@@ -933,7 +944,8 @@ async fn ensure_cloudflared(state_dir: &std::path::Path) -> Result<PathBuf> {
         println!("Trying cloudflared: {}", ranked_url);
         match client.get(&ranked_url).send().await {
             Ok(resp) if resp.status().is_success() => {
-                let bytes = match resp.bytes().await {
+                let bytes = match mihomo::download_response_with_progress(resp, "cloudflared").await
+                {
                     Ok(bytes) => bytes,
                     Err(err) => {
                         last_err = Some(format!("download body error from {ranked_url}: {err}"));
