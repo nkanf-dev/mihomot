@@ -14,6 +14,12 @@ use crate::app::{
 
 struct Theme;
 
+// Color thresholds classify latency; the wider gauge range keeps typical node delays visually distinct.
+const LATENCY_GOOD_MS: u64 = 200;
+const LATENCY_WARN_MS: u64 = 500;
+const LATENCY_GAUGE_BEST_MS: u64 = 50;
+const LATENCY_GAUGE_WORST_MS: u64 = 1000;
+
 impl Theme {
     const BG: Color = Color::Rgb(22, 24, 31);
     const PANEL: Color = Color::Rgb(30, 32, 41);
@@ -348,11 +354,7 @@ fn draw_latency_gauge(f: &mut Frame, app: &App, area: Rect) {
         }
         Some(ProxyLatencyStatus::Success(ms)) => {
             let color = latency_color(Some(*ms));
-            (
-                format!("{} ms", ms),
-                color,
-                (1000.0 / (*ms as f64).max(10.0) * 100.0).min(100.0) as u16,
-            )
+            (format!("{} ms", ms), color, latency_gauge_percent(*ms))
         }
         Some(ProxyLatencyStatus::Failed(msg)) => (format!("Err: {msg}"), Theme::BAD, 100),
         None if selected_proxy_name.is_some() => ("Untested".to_string(), Theme::MUTED, 0),
@@ -866,11 +868,24 @@ fn format_speed(bytes: u64) -> String {
 
 fn latency_color(latency: Option<u64>) -> Color {
     match latency {
-        Some(ms) if ms < 200 => Theme::GOOD,
-        Some(ms) if ms < 500 => Theme::WARN,
+        Some(ms) if ms < LATENCY_GOOD_MS => Theme::GOOD,
+        Some(ms) if ms < LATENCY_WARN_MS => Theme::WARN,
         Some(_) => Theme::BAD,
         None => Theme::MUTED,
     }
+}
+
+fn latency_gauge_percent(ms: u64) -> u16 {
+    if ms <= LATENCY_GAUGE_BEST_MS {
+        return 100;
+    }
+    if ms >= LATENCY_GAUGE_WORST_MS {
+        return 0;
+    }
+
+    let range = LATENCY_GAUGE_WORST_MS - LATENCY_GAUGE_BEST_MS;
+    let remaining = LATENCY_GAUGE_WORST_MS - ms;
+    ((remaining * 100) / range) as u16
 }
 
 fn proxy_latency_display(latency: Option<&ProxyLatencyStatus>) -> (String, Style) {
@@ -1225,9 +1240,20 @@ mod tests {
     #[tokio::test]
     async fn dashboard_shows_selected_node_latency() {
         let mut app = test_app();
+        app.group_names = vec!["Auto".to_string()];
         app.set_route(Route::Dashboard);
         app.group_state.select(Some(0));
         app.proxy_state.select(Some(0));
+        app.proxies.insert(
+            "Auto".to_string(),
+            ProxyItem {
+                name: Some("Auto".to_string()),
+                proxy_type: Some("Selector".to_string()),
+                now: Some("Node A".to_string()),
+                all: Some(vec!["Node A".to_string(), "Node B".to_string()]),
+                extra: serde_json::Map::new(),
+            },
+        );
         app.proxy_latency
             .insert("Node A".to_string(), ProxyLatencyStatus::Testing);
 
@@ -1236,6 +1262,14 @@ mod tests {
         assert!(screen.contains("Selected Node Latency"));
         assert!(screen.contains("Node A"));
         assert!(screen.contains("Testing selected node"));
+    }
+
+    #[test]
+    fn latency_gauge_preserves_typical_latency_variation() {
+        assert_eq!(latency_gauge_percent(50), 100);
+        assert!(latency_gauge_percent(120) > latency_gauge_percent(500));
+        assert!(latency_gauge_percent(500) > latency_gauge_percent(900));
+        assert_eq!(latency_gauge_percent(1000), 0);
     }
 
     #[tokio::test]
