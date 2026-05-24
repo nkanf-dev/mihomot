@@ -816,9 +816,9 @@ impl App {
                     }
                 }
                 Ok(resp) => ProxyLatencyStatus::Failed(format!("HTTP {}", resp.status())),
-                Err(e) if e.is_timeout() => ProxyLatencyStatus::Failed("Timeout".to_string()),
-                Err(e) if e.is_connect() => ProxyLatencyStatus::Failed("Conn Err".to_string()),
-                Err(_) => ProxyLatencyStatus::Failed("Error".to_string()),
+                Err(e) if e.is_timeout() => ProxyLatencyStatus::Failed(format!("Timeout: {}", e.without_url())),
+                Err(e) if e.is_connect() => ProxyLatencyStatus::Failed(format!("Conn Err: {}", e.without_url())),
+                Err(e) => ProxyLatencyStatus::Failed(format!("Error: {}", e.without_url())),
             };
 
             let _ = tx.send((proxy_name, status)).await;

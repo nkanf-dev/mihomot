@@ -127,6 +127,8 @@ async fn post_config_switch(
         return unauthorized();
     }
 
+    let _mutation_guard = state.mutation_lock.lock().await;
+
     let current_path = state.config_path.read().await.clone();
     let state_clone = Arc::clone(&state);
     let payload_path = payload.path.clone();
@@ -141,8 +143,6 @@ async fn post_config_switch(
         Ok(path) => path,
         Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
-
-    let _mutation_guard = state.mutation_lock.lock().await;
 
     match crate::mihomo::reload(&state.mihomo_endpoint, &state.secret, &target_path).await {
         Ok(()) => {
@@ -207,22 +207,25 @@ async fn post_config_raw(
     let _mutation_guard = state.mutation_lock.lock().await;
     let config_path = state.config_path.read().await.clone();
 
-    // Backup before writing
-    let backup_path = match config::backup_config(&config_path) {
+    let config_path_for_task = config_path.clone();
+    let body_for_task = body.clone();
+    
+    let disk_result = tokio::task::spawn_blocking(move || {
+        let backup_path = config::backup_config(&config_path_for_task)?;
+        config::write_raw(&config_path_for_task, &body_for_task)?;
+        Ok::<_, anyhow::Error>(backup_path)
+    }).await.unwrap_or_else(|e| Err(anyhow::anyhow!("Disk IO task failed: {}", e)));
+
+    let backup_path = match disk_result {
         Ok(path) => path,
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to backup config: {}", e),
+                format!("Failed to write config: {}", e),
             )
                 .into_response();
         }
     };
-
-    // Write new config
-    if let Err(e) = config::write_raw(&config_path, &body) {
-        return (StatusCode::BAD_REQUEST, format!("Invalid config: {}", e)).into_response();
-    }
 
     // Reload mihomo
     match crate::mihomo::reload(&state.mihomo_endpoint, &state.secret, &config_path).await {
@@ -501,6 +504,19 @@ fn parse_endpoint_host_port(endpoint: &str) -> (String, Option<u16>) {
         .unwrap_or(endpoint);
     let host_port = without_scheme.split('/').next().unwrap_or(without_scheme);
 
+    if host_port.starts_with('[') {
+        if let Some(closing_bracket) = host_port.find(']') {
+            let host = &host_port[1..closing_bracket];
+            let remainder = &host_port[closing_bracket + 1..];
+            if remainder.starts_with(':') {
+                let port_str = &remainder[1..];
+                return (host.to_string(), port_str.parse::<u16>().ok());
+            } else {
+                return (host.to_string(), None);
+            }
+        }
+    }
+
     if let Some((host, port)) = host_port.rsplit_once(':') {
         (host.to_string(), port.parse::<u16>().ok())
     } else {
@@ -737,13 +753,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_endpoint_host_port_handles_http_urls() {
+    fn parse_endpoint_host_port_handles_urls_and_ipv6() {
         assert_eq!(parse_endpoint_host_port("http://127.0.0.1:9090"), ("127.0.0.1".to_string(), Some(9090)));
         assert_eq!(
             parse_endpoint_host_port("https://example.com:9443/x"),
             ("example.com".to_string(), Some(9443))
         );
         assert_eq!(parse_endpoint_host_port("http://example.com"), ("example.com".to_string(), None));
+        assert_eq!(parse_endpoint_host_port("http://[::1]:9090"), ("::1".to_string(), Some(9090)));
+        assert_eq!(parse_endpoint_host_port("http://[::1]"), ("::1".to_string(), None));
     }
 
     #[tokio::test]
