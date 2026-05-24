@@ -24,6 +24,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
       prerelease: ${{ steps.release.outputs.prerelease }}
     steps:
       - name: Resolve tag
@@ -42,6 +43,7 @@ jobs:
           fi
 
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
           if [[ "$tag" == *-* ]]; then
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
           else
@@ -73,6 +75,45 @@ jobs:
 
       - name: Install musl tools
         run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Sync crate version to release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${{ needs.prepare.outputs.version }}"
+
+          python3 - <<'PY'
+          import pathlib
+          import re
+
+          version = "${{ needs.prepare.outputs.version }}"
+
+          cargo_toml = pathlib.Path("Cargo.toml")
+          cargo_toml.write_text(
+              re.sub(
+                  r'(?m)^(version = ")([^"]+)(")$',
+                  rf'\g<1>{version}\3',
+                  cargo_toml.read_text(),
+                  count=1,
+              )
+          )
+
+          cargo_lock = pathlib.Path("Cargo.lock")
+          lines = cargo_lock.read_text().splitlines()
+          for i, line in enumerate(lines):
+              if line == 'name = "mihomot"':
+                  if i + 1 >= len(lines) or not lines[i + 1].startswith('version = "'):
+                      raise RuntimeError("Could not locate mihomot version entry in Cargo.lock")
+                  lines[i + 1] = f'version = "{version}"'
+                  break
+          else:
+              raise RuntimeError("Could not locate mihomot package in Cargo.lock")
+
+          cargo_lock.write_text("\n".join(lines) + "\n")
+          PY
+
+          grep -m1 '^version = ' Cargo.toml
 
       - name: Test
         run: cargo test --locked --verbose
