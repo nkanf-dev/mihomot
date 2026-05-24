@@ -17,6 +17,7 @@ struct AppState {
     mutation_lock: Arc<tokio::sync::Mutex<()>>,
     secret: String,
     mihomo_endpoint: String,
+    http_client: reqwest::Client,
 }
 
 #[derive(Debug, Deserialize)]
@@ -32,11 +33,13 @@ pub async fn start_server(
     mihomo_endpoint: String,
 ) -> Result<(), anyhow::Error> {
     let config_path = std::fs::canonicalize(&config_path).unwrap_or(config_path);
+    let http_client = reqwest::Client::builder().no_proxy().build()?;
     let state = Arc::new(AppState {
         config_path: Arc::new(tokio::sync::RwLock::new(config_path)),
         mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
         secret,
         mihomo_endpoint,
+        http_client,
     });
 
     let app = build_router(state);
@@ -204,6 +207,10 @@ async fn post_config_raw(
         return unauthorized();
     }
 
+    if let Err(e) = serde_yaml::from_str::<serde_yaml::Value>(&body) {
+        return (StatusCode::BAD_REQUEST, format!("Invalid YAML config: {}", e)).into_response();
+    }
+
     let _mutation_guard = state.mutation_lock.lock().await;
     let config_path = state.config_path.read().await.clone();
 
@@ -327,16 +334,7 @@ async fn get_status(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
         return unauthorized();
     }
 
-    let client = match reqwest::Client::builder().no_proxy().build() {
-        Ok(client) => client,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to build mihomo API client: {}", e),
-            )
-                .into_response();
-        }
-    };
+    let client = state.http_client.clone();
     let config_path = state.config_path.read().await.clone();
 
     // Fetch version
@@ -547,16 +545,7 @@ async fn proxy_mihomo_native(
         url.push_str(query);
     }
 
-    let client = match reqwest::Client::builder().no_proxy().build() {
-        Ok(client) => client,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to build mihomo API client: {}", e),
-            )
-                .into_response();
-        }
-    };
+    let client = state.http_client.clone();
     let req_method = match reqwest::Method::from_bytes(method.as_str().as_bytes()) {
         Ok(method) => method,
         Err(_) => return (StatusCode::METHOD_NOT_ALLOWED, "Unsupported method").into_response(),
@@ -741,6 +730,7 @@ mod tests {
             mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
             secret: "s".to_string(),
             mihomo_endpoint: "http://127.0.0.1:9090".to_string(),
+            http_client: reqwest::Client::builder().no_proxy().build().unwrap(),
         };
 
         validate_switch_target(&state, &same).expect("matching target should be accepted");
@@ -797,6 +787,7 @@ mod tests {
             mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
             secret: String::new(),
             mihomo_endpoint,
+            http_client: reqwest::Client::builder().no_proxy().build().unwrap(),
         });
         let app = build_router(state.clone());
 

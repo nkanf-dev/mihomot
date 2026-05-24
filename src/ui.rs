@@ -220,6 +220,8 @@ fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_dashboard(f: &mut Frame, app: &App, area: Rect) {
+    let inner_area = draw_content_outline(f, app, area, " Dashboard ");
+    
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
@@ -228,7 +230,7 @@ fn draw_dashboard(f: &mut Frame, app: &App, area: Rect) {
             Constraint::Length(3),
             Constraint::Min(8),
         ])
-        .split(area);
+        .split(inner_area);
 
     let summary = Layout::default()
         .direction(Direction::Horizontal)
@@ -244,18 +246,16 @@ fn draw_dashboard(f: &mut Frame, app: &App, area: Rect) {
     draw_traffic_card(f, app, summary[2]);
     draw_latency_gauge(f, app, chunks[1]);
     draw_traffic_sparklines(f, app, chunks[2]);
-
-    draw_content_outline(f, app, area, " Dashboard ");
 }
 
-fn draw_content_outline(f: &mut Frame, app: &App, area: Rect, title: &str) {
-    f.render_widget(
-        Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_style(focus_border_style(app.focus == Focus::Content)),
-        area,
-    );
+fn draw_content_outline(f: &mut Frame, app: &App, area: Rect, title: &str) -> Rect {
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(focus_border_style(app.focus == Focus::Content));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    inner
 }
 
 fn draw_config_card(f: &mut Frame, app: &App, area: Rect) {
@@ -412,6 +412,8 @@ fn draw_traffic_sparklines(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_proxies_page(f: &mut Frame, app: &App, area: Rect) {
+    let inner_area = draw_content_outline(f, app, area, " Proxies ");
+    
     let direction = if area.width < 90 {
         Direction::Vertical
     } else {
@@ -421,11 +423,10 @@ fn draw_proxies_page(f: &mut Frame, app: &App, area: Rect) {
         .direction(direction)
         .margin(1)
         .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
-        .split(area);
+        .split(inner_area);
 
     draw_group_cards(f, app, chunks[0]);
     draw_proxy_cards(f, app, chunks[1]);
-    draw_content_outline(f, app, area, " Proxies ");
 }
 
 fn draw_group_cards(f: &mut Frame, app: &App, area: Rect) {
@@ -559,14 +560,14 @@ fn card_text_style(selected: bool, focused_pane: bool) -> Style {
 }
 
 fn draw_settings_page(f: &mut Frame, app: &mut App, area: Rect) {
+    let inner_area = draw_content_outline(f, app, area, " Settings ");
     let inner = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
         .constraints([Constraint::Min(0)])
-        .split(area)[0];
+        .split(inner_area)[0];
 
     draw_settings_table(f, app, inner);
-    draw_content_outline(f, app, area, " Settings ");
 }
 
 fn draw_settings_table(f: &mut Frame, app: &mut App, area: Rect) {
@@ -716,11 +717,12 @@ fn setting_row_data(app: &App, item: &ConfigEntry) -> (&'static str, String, &'s
 }
 
 fn draw_help(f: &mut Frame, app: &App, area: Rect) {
+    let inner_area = draw_content_outline(f, app, area, " Help ");
     let inner = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
         .constraints([Constraint::Min(0)])
-        .split(area)[0];
+        .split(inner_area)[0];
 
     let lines = vec![
         Line::from(vec![
@@ -756,15 +758,31 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         ]),
         Line::from(""),
         Line::from(vec![
-            Span::styled(
-                "Settings",
-                Style::default()
-                    .fg(Theme::ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(
-                "  j/k choose setting  Enter edit/cycle/toggle/switch/open file  Esc back to nav",
-            ),
+            Span::styled("Navigation: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw("Use "),
+            Span::styled("j/k", Theme::ACCENT_ALT),
+            Span::raw(" or "),
+            Span::styled("up/down", Theme::ACCENT_ALT),
+            Span::raw(" to move. Use "),
+            Span::styled("Enter", Theme::ACCENT_ALT),
+            Span::raw(" to activate."),
+        ]),
+        Line::from(vec![
+            Span::styled("Sidebar:    ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw("Use "),
+            Span::styled("h/l", Theme::ACCENT_ALT),
+            Span::raw(" or "),
+            Span::styled("left/right", Theme::ACCENT_ALT),
+            Span::raw(" to switch between Sidebar and Content."),
+        ]),
+        Line::from(vec![
+            Span::styled("Actions:    ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled("e", Theme::ACCENT_ALT),
+            Span::raw(" to edit config. "),
+            Span::styled("t", Theme::ACCENT_ALT),
+            Span::raw(" to test latency. "),
+            Span::styled("r", Theme::ACCENT_ALT),
+            Span::raw(" to restart mihomo."),
         ]),
         Line::from(""),
         Line::from(Span::styled(
@@ -785,7 +803,6 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
             .wrap(Wrap { trim: false }),
         inner,
     );
-    draw_content_outline(f, app, area, " Help ");
 }
 
 fn render_card(f: &mut Frame, area: Rect, title: &str, lines: Vec<Line<'_>>, active: bool) {
