@@ -34,6 +34,8 @@
 
 | 端点 | 方法 | 用途 |
 |------|------|------|
+| `/mhmt/config/list` | GET | 列出当前配置同目录下可切换的 mihomo YAML |
+| `/mhmt/config/switch` | POST | 切换 active config 并 reload mihomo |
 | `/mhmt/config/raw` | GET | 返回完整 config.yaml |
 | `/mhmt/config/raw` | POST | 整体替换 config.yaml 并 reload |
 | `/mhmt/config/backup` | GET | 创建并返回带时间戳的备份 |
@@ -80,7 +82,20 @@ mihomo API 的 endpoint 和 secret 与 mihomot 相同。高级场景下也可以
 5. 检查返回结果，失败则告知用户
 ```
 
-### 4.3 操作前检查
+### 4.3 多配置文件切换
+
+服务器可能在同一个 mihomo 配置目录下保存多个可切换 YAML。切换时：
+
+```
+1. GET /mhmt/config/list
+2. 从 configs 数组中选择目标 path；优先使用用户提到的 label/detail 匹配
+3. POST /mhmt/config/switch  body: {"path": "/path/to/target.yaml"}
+4. GET /mhmt/status 确认 config_path、mode 和 alive 状态
+```
+
+`/mhmt/config/switch` 只允许切换到当前 active config 同目录下的 mihomo 主配置文件。目标配置的 `secret` 和 `external-controller` 端口必须与当前 mihomot 启动时使用的配置兼容；否则需要先编辑目标配置，或让用户用目标配置重启 mihomot。
+
+### 4.4 操作前检查
 
 每次操作前先 `GET /mhmt/status` 确认服务器在线。
 

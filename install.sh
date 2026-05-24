@@ -405,7 +405,8 @@ install_systemd_service() {
     region_env="Environment=MIHOMOT_REGION=cn"
   fi
 
-  cat > "$service_file" <<EOF
+  {
+    cat <<EOF
 [Unit]
 Description=mihomot API server
 After=network-online.target
@@ -413,7 +414,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-${region_env}
+EOF
+    [ -n "$region_env" ] && printf '%s\n' "$region_env"
+    cat <<EOF
 ExecStart=${INSTALL_DIR}/${BIN_NAME} serve --config ${CONFIG_PATH}
 Restart=on-failure
 RestartSec=3
@@ -422,6 +425,7 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 EOF
+  } > "$service_file"
 
   info "installing systemd service: ${SERVICE_NAME}.service"
   as_root install -m 644 "$service_file" "/etc/systemd/system/${SERVICE_NAME}.service"
@@ -430,6 +434,11 @@ EOF
 }
 
 install_tui_settings() {
+  if ! as_root test -f "$CONFIG_PATH"; then
+    warn "mihomo config not found at ${CONFIG_PATH}; skipping TUI settings"
+    return
+  fi
+
   local target_user
   local target_home
   local settings_dir
@@ -447,8 +456,8 @@ install_tui_settings() {
   fi
   [ -n "$target_home" ] || target_home="${HOME:-/root}"
 
-  secret="$(as_root awk -F ': *' '/^secret:/ {print $2; exit}' "$CONFIG_PATH" | tr -d '\"' || true)"
-  controller="$(as_root awk -F ': *' '/^external-controller:/ {print $2; exit}' "$CONFIG_PATH" | tr -d '\"' || true)"
+  secret="$(as_root awk '/^secret:/ {sub(/^secret:[[:space:]]*/, ""); sub(/[[:space:]]+#.*/, ""); sub(/[[:space:]]+$/, ""); print; exit}' "$CONFIG_PATH" | tr -d '\"' || true)"
+  controller="$(as_root awk '/^external-controller:/ {sub(/^external-controller:[[:space:]]*/, ""); sub(/[[:space:]]+#.*/, ""); sub(/[[:space:]]+$/, ""); print; exit}' "$CONFIG_PATH" | tr -d '\"' || true)"
   port="${controller##*:}"
   case "$port" in
     '' | *[!0-9]*)

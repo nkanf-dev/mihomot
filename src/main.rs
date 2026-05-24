@@ -1,9 +1,9 @@
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use app::ConfigEntry;
 use clap::{Parser, Subcommand};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 mod app;
@@ -111,6 +111,8 @@ async fn run_serve(config_override: Option<String>, listen: String) -> Result<()
         eprintln!("Please create it first or specify --config <path>");
         std::process::exit(1);
     }
+    let config_path = fs::canonicalize(&config_path)
+        .with_context(|| format!("Failed to resolve {}", config_path.display()))?;
 
     // Read mihomo config to get external-controller and secret
     let mihomo_config = match config::read_config(&config_path) {
@@ -199,14 +201,21 @@ async fn run_tui(
     secret: Option<String>,
     config_override: Option<String>,
 ) -> Result<()> {
+    let config_path = match config_override {
+        Some(path) => PathBuf::from(path),
+        None => config::default_config_path(),
+    };
+    let config_path = if config_path.exists() {
+        fs::canonicalize(&config_path)
+            .with_context(|| format!("Failed to resolve {}", config_path.display()))?
+    } else {
+        config_path
+    };
+
     // Auto-detect url/secret from mihomo config if not provided
     let (url, secret) = match (url, secret) {
         (Some(u), Some(s)) => (Some(u), Some(s)),
         (u, s) => {
-            let config_path = match &config_override {
-                Some(p) => std::path::PathBuf::from(p),
-                None => config::user_config_path(),
-            };
             if config_path.exists() {
                 if let Ok(mc) = config::read_config(&config_path) {
                     let detected_url = u.or_else(|| {
@@ -234,6 +243,7 @@ async fn run_tui(
     let mut terminal = ratatui::init();
 
     let mut app = app::App::new(url, secret);
+    app.config_path = config_path;
     let _ = app.fetch_proxies().await;
     let _ = app.fetch_config().await;
     app.trigger_latency_test();
@@ -255,8 +265,8 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App) ->
             app.real_latency_status = status;
         }
 
-        while let Ok((name, latency)) = app.proxy_test_rx.try_recv() {
-            app.proxy_latency.insert(name, Some(latency));
+        while let Ok((name, latency_status)) = app.proxy_test_rx.try_recv() {
+            app.proxy_latency.insert(name, latency_status);
         }
 
         while let Ok(traffic) = app.traffic_rx.try_recv() {
@@ -291,7 +301,26 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App) ->
                 continue;
             }
 
-            if app.show_info_popup {
+            if app.show_config_picker {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        app.show_config_picker = false;
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => app.next_config_candidate(),
+                    KeyCode::Char('k') | KeyCode::Up => app.previous_config_candidate(),
+                    KeyCode::Enter => {
+                        if let Some(path) = app.selected_config_candidate() {
+                            if let Err(err) = switch_config_file(app, &path).await {
+                                app.error = Some(err.to_string());
+                            } else {
+                                app.error = None;
+                                app.show_config_picker = false;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            } else if app.show_info_popup {
                 match key.code {
                     KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('i') => {
                         app.show_info_popup = false;
@@ -301,141 +330,361 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App) ->
                     KeyCode::Char('k') | KeyCode::Up => app.scroll_popup_up(),
                     _ => {}
                 }
-            } else if let app::Focus::Settings = app.focus {
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('s') => {
-                        app.focus = app.previous_focus.clone();
-                    }
-                    KeyCode::Char('j') | KeyCode::Down => app.next_setting(),
-                    KeyCode::Char('k') | KeyCode::Up => app.previous_setting(),
-                    KeyCode::Enter => {
-                        if let Some(idx) = app.settings_state.selected()
-                            && let Some(entry) = app.settings_items.get(idx).cloned()
-                        {
-                            match entry {
-                                ConfigEntry::MixedPort
-                                | ConfigEntry::BindAddress
-                                | ConfigEntry::BaseUrl
-                                | ConfigEntry::ApiSecret
-                                | ConfigEntry::TestUrl
-                                | ConfigEntry::TestTimeout => {
-                                    app.is_editing = true;
-                                    if let Some(config) = &app.config {
-                                        app.editing_value = match entry {
-                                            ConfigEntry::MixedPort => config.mixed_port.to_string(),
-                                            ConfigEntry::BindAddress => config.bind_address.clone(),
-                                            ConfigEntry::BaseUrl => {
-                                                app.app_settings.base_url.clone()
-                                            }
-                                            ConfigEntry::ApiSecret => {
-                                                app.app_settings.api_secret.clone()
-                                            }
-                                            ConfigEntry::TestUrl => {
-                                                app.app_settings.test_url.clone()
-                                            }
-                                            ConfigEntry::TestTimeout => {
-                                                app.app_settings.test_timeout.to_string()
-                                            }
-                                            _ => String::new(),
-                                        };
-                                    } else if matches!(
-                                        entry,
-                                        ConfigEntry::BaseUrl
-                                            | ConfigEntry::ApiSecret
-                                            | ConfigEntry::TestUrl
-                                            | ConfigEntry::TestTimeout
-                                    ) {
-                                        app.editing_value = match entry {
-                                            ConfigEntry::BaseUrl => {
-                                                app.app_settings.base_url.clone()
-                                            }
-                                            ConfigEntry::ApiSecret => {
-                                                app.app_settings.api_secret.clone()
-                                            }
-                                            ConfigEntry::TestUrl => {
-                                                app.app_settings.test_url.clone()
-                                            }
-                                            ConfigEntry::TestTimeout => {
-                                                app.app_settings.test_timeout.to_string()
-                                            }
-                                            _ => String::new(),
-                                        };
-                                    }
-                                }
-                                _ => {
-                                    if let Err(err) = handle_setting_change(app, entry).await {
-                                        app.error = Some(err.to_string());
-                                    } else {
-                                        app.error = None;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
             } else {
                 match key.code {
                     KeyCode::Char('q') => return Ok(()),
+                    KeyCode::Char('?') | KeyCode::F(1) => {
+                        app.set_route(app::Route::Help);
+                    }
                     KeyCode::Char('r') => {
-                        if let app::Focus::Proxies = app.focus {
-                            app.trigger_group_latency_test();
-                        }
                         let _ = app.fetch_proxies().await;
                         let _ = app.fetch_config().await;
+                        if app.route == app::Route::Proxies {
+                            app.trigger_group_latency_test();
+                        }
                     }
                     KeyCode::Char('t') => {
-                        app.trigger_latency_test();
+                        if app.route == app::Route::Proxies {
+                            app.trigger_selected_proxy_latency_test();
+                        } else {
+                            app.trigger_latency_test();
+                        }
                     }
                     KeyCode::Char('s') => {
-                        app.previous_focus = app.focus.clone();
-                        app.focus = app::Focus::Settings;
+                        app.set_route(app::Route::Settings);
+                    }
+                    KeyCode::Tab => {
+                        app.toggle_focus();
                     }
                     KeyCode::Char('i') => {
-                        if let app::Focus::Proxies = app.focus {
+                        if app.route == app::Route::Proxies {
                             app.show_info_popup = true;
                         }
                     }
-                    KeyCode::Down | KeyCode::Char('j') => match app.focus {
-                        app::Focus::Groups => app.next_group(),
-                        app::Focus::Proxies => app.next_proxy(),
-                        _ => {}
-                    },
-                    KeyCode::Up | KeyCode::Char('k') => match app.focus {
-                        app::Focus::Groups => app.previous_group(),
-                        app::Focus::Proxies => app.previous_proxy(),
-                        _ => {}
-                    },
-                    KeyCode::Right | KeyCode::Char('l') => {
-                        app.focus = app::Focus::Proxies;
+                    KeyCode::Esc => {
+                        app.focus_nav();
                     }
-                    KeyCode::Left | KeyCode::Char('h') | KeyCode::Esc => {
-                        app.focus = app::Focus::Groups;
-                    }
-                    KeyCode::Enter => {
-                        if let app::Focus::Proxies = app.focus {
-                            if let Some(group_name) = app.get_selected_group_name()
-                                && let Some(proxy_name) = app.get_selected_proxy_name()
-                            {
-                                let g_name = group_name.clone();
-                                let p_name = proxy_name.clone();
-                                match app.select_proxy(&g_name, &p_name).await {
-                                    Ok(()) => {
-                                        let _ = app.fetch_proxies().await;
-                                        app.error = None;
-                                    }
-                                    Err(err) => app.error = Some(err.to_string()),
-                                }
+                    _ => match app.focus {
+                        app::Focus::Nav => {
+                            if handle_nav_key(app, key.code) {
+                                return Ok(());
                             }
-                        } else {
-                            app.focus = app::Focus::Proxies;
                         }
-                    }
-                    _ => {}
+                        app::Focus::Content => match app.route {
+                            app::Route::Dashboard | app::Route::Help => {
+                                handle_simple_content_key(app, key.code);
+                            }
+                            app::Route::Proxies => {
+                                handle_proxies_key(app, key.code).await;
+                            }
+                            app::Route::Settings => {
+                                handle_settings_key(terminal, app, key.code).await;
+                            }
+                        },
+                    },
                 }
             }
         }
     }
+}
+
+/// Handle sidebar keys; returns true only when the user activates Quit.
+fn handle_nav_key(app: &mut app::App, code: crossterm::event::KeyCode) -> bool {
+    use crossterm::event::KeyCode;
+
+    match code {
+        KeyCode::Char('j') | KeyCode::Down => app.next_nav(),
+        KeyCode::Char('k') | KeyCode::Up => app.previous_nav(),
+        KeyCode::Char('l') | KeyCode::Right if app.selected_nav_item().route == Some(app.route) => {
+            app.focus = app::Focus::Content;
+        }
+        KeyCode::Enter => return app.activate_nav(),
+        _ => {}
+    }
+
+    false
+}
+
+/// Handle pages that only need a way back to the sidebar.
+fn handle_simple_content_key(app: &mut app::App, code: crossterm::event::KeyCode) {
+    use crossterm::event::KeyCode;
+
+    match code {
+        KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => app.focus_nav(),
+        _ => {}
+    }
+}
+
+/// Handle proxy group and node navigation without changing the underlying API logic.
+async fn handle_proxies_key(app: &mut app::App, code: crossterm::event::KeyCode) {
+    use crossterm::event::KeyCode;
+
+    match code {
+        KeyCode::Left | KeyCode::Char('h') => match app.proxy_pane {
+            app::ProxyPane::Groups => app.focus_nav(),
+            app::ProxyPane::Proxies => app.set_proxy_pane(app::ProxyPane::Groups),
+        },
+        KeyCode::Right | KeyCode::Char('l') if app.proxy_pane == app::ProxyPane::Groups => {
+            app.set_proxy_pane(app::ProxyPane::Proxies);
+        }
+        KeyCode::Esc => app.focus_nav(),
+        KeyCode::Down | KeyCode::Char('j') => match app.proxy_pane {
+            app::ProxyPane::Groups => app.next_group(),
+            app::ProxyPane::Proxies => app.next_proxy(),
+        },
+        KeyCode::Up | KeyCode::Char('k') => match app.proxy_pane {
+            app::ProxyPane::Groups => app.previous_group(),
+            app::ProxyPane::Proxies => app.previous_proxy(),
+        },
+        KeyCode::Enter => match app.proxy_pane {
+            app::ProxyPane::Groups => app.set_proxy_pane(app::ProxyPane::Proxies),
+            app::ProxyPane::Proxies => {
+                if let Some(group_name) = app.get_selected_group_name()
+                    && let Some(proxy_name) = app.get_selected_proxy_name()
+                {
+                    let group_name = group_name.clone();
+                    match app.select_proxy(&group_name, &proxy_name).await {
+                        Ok(()) => {
+                            let _ = app.fetch_proxies().await;
+                            app.error = None;
+                        }
+                        Err(err) => app.error = Some(err.to_string()),
+                    }
+                }
+            }
+        },
+        _ => {}
+    }
+}
+
+/// Handle settings table navigation and commit editable or toggleable entries.
+async fn handle_settings_key(
+    terminal: &mut ratatui::DefaultTerminal,
+    app: &mut app::App,
+    code: crossterm::event::KeyCode,
+) {
+    use crossterm::event::KeyCode;
+
+    if handle_settings_navigation_key(app, code) {
+        return;
+    }
+
+    if code == KeyCode::Enter
+        && let Some(idx) = app.settings_state.selected()
+        && let Some(entry) = app.settings_items.get(idx).cloned()
+    {
+        match entry {
+            ConfigEntry::MixedPort
+            | ConfigEntry::BindAddress
+            | ConfigEntry::BaseUrl
+            | ConfigEntry::ApiSecret
+            | ConfigEntry::TestUrl
+            | ConfigEntry::TestTimeout
+            | ConfigEntry::ConfigPath => begin_setting_edit(app, entry),
+            ConfigEntry::ConfigSwitch => match app.refresh_config_candidates() {
+                Ok(()) => {
+                    app.show_config_picker = true;
+                    app.error = None;
+                }
+                Err(err) => app.error = Some(err.to_string()),
+            },
+            ConfigEntry::ConfigFile => {
+                if let Err(err) = edit_config_file(terminal, app).await {
+                    app.error = Some(err.to_string());
+                } else {
+                    app.error = None;
+                }
+            }
+            _ => {
+                if let Err(err) = handle_setting_change(app, entry).await {
+                    app.error = Some(err.to_string());
+                } else {
+                    app.error = None;
+                }
+            }
+        }
+    }
+}
+
+fn handle_settings_navigation_key(app: &mut app::App, code: crossterm::event::KeyCode) -> bool {
+    use crossterm::event::KeyCode;
+
+    match code {
+        KeyCode::Esc | KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l') => {
+            app.focus_nav();
+            true
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            app.next_setting();
+            true
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.previous_setting();
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Seed the edit popup with the current value for a setting entry.
+fn begin_setting_edit(app: &mut app::App, entry: ConfigEntry) {
+    app.is_editing = true;
+    app.editing_value = match entry {
+        ConfigEntry::MixedPort => app
+            .config
+            .as_ref()
+            .map(|config| config.mixed_port.to_string())
+            .unwrap_or_default(),
+        ConfigEntry::BindAddress => app
+            .config
+            .as_ref()
+            .map(|config| config.bind_address.clone())
+            .unwrap_or_default(),
+        ConfigEntry::BaseUrl => app.app_settings.base_url.clone(),
+        ConfigEntry::ApiSecret => app.app_settings.api_secret.clone(),
+        ConfigEntry::TestUrl => app.app_settings.test_url.clone(),
+        ConfigEntry::TestTimeout => app.app_settings.test_timeout.to_string(),
+        ConfigEntry::ConfigPath | ConfigEntry::ConfigFile => app.config_path.display().to_string(),
+        _ => String::new(),
+    };
+}
+
+async fn switch_config_file(app: &mut app::App, path: &Path) -> Result<()> {
+    let path = expand_config_path(path);
+    if !path.exists() {
+        bail!("Config file not found: {}", path.display());
+    }
+
+    let path =
+        fs::canonicalize(&path).with_context(|| format!("Failed to resolve {}", path.display()))?;
+    let current_base_url = app.app_settings.base_url.clone();
+    let current_api_secret = app.app_settings.api_secret.clone();
+
+    app.reload_config_file(&path).await.with_context(|| {
+        format!(
+            "Failed to tell mihomo to load {}; check external-controller, secret, and SAFE_PATHS",
+            path.display()
+        )
+    })?;
+
+    app.config_path = path;
+    app.app_settings.base_url = current_base_url;
+    app.app_settings.api_secret = current_api_secret;
+    app.save_app_settings()?;
+    app.restart_traffic_monitor();
+    let _ = app.fetch_config().await;
+    let _ = app.fetch_proxies().await;
+    app.trigger_latency_test();
+    let _ = app.refresh_config_candidates();
+    Ok(())
+}
+
+fn expand_config_path(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return PathBuf::from(home).join(rest);
+    }
+    path.to_path_buf()
+}
+
+async fn edit_config_file(
+    terminal: &mut ratatui::DefaultTerminal,
+    app: &mut app::App,
+) -> Result<()> {
+    let path = app.config_path.clone();
+
+    ratatui::restore();
+    let edit_result = edit_config_file_on_disk(&path);
+    *terminal = ratatui::init();
+
+    if edit_result? {
+        app.reload_config_file(&path)
+            .await
+            .with_context(|| format!("Failed to reload edited config {}", path.display()))?;
+        app.fetch_config().await?;
+        app.fetch_proxies().await?;
+    }
+
+    Ok(())
+}
+
+fn edit_config_file_on_disk(path: &Path) -> Result<bool> {
+    if !path.exists() {
+        bail!("Config file not found: {}", path.display());
+    }
+
+    let initial = config::read_raw(path)?;
+    let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("yaml");
+
+    let mut temp_file = tempfile::Builder::new()
+        .prefix("mihomot_config_")
+        .suffix(&format!(".{}", extension))
+        .tempfile()
+        .with_context(|| "Failed to securely create temp editor file")?;
+
+    use std::io::Write;
+    temp_file
+        .write_all(initial.as_bytes())
+        .with_context(|| "Failed to write initial content to temp editor file")?;
+    temp_file.flush()?;
+
+    let temp_path_keeper = temp_file.into_temp_path();
+    let temp_path = temp_path_keeper.to_path_buf();
+
+    let editor_result = run_external_editor_for_file(&temp_path);
+    editor_result?;
+
+    let edited = fs::read_to_string(&temp_path)
+        .with_context(|| format!("Failed to read edited temp file {}", temp_path.display()))?;
+
+    drop(temp_path_keeper);
+
+    apply_edited_config_file(path, &initial, &edited)
+}
+
+fn apply_edited_config_file(path: &Path, initial: &str, edited: &str) -> Result<bool> {
+    if edited == initial {
+        return Ok(false);
+    }
+
+    serde_yaml::from_str::<config::MihomoConfig>(edited)
+        .with_context(|| "Edited mihomo config is not valid YAML/config")?;
+
+    let backup_path = config::backup_config(path)?;
+    config::write_raw(path, edited).with_context(|| {
+        format!(
+            "Failed to write edited config to {} (backup saved at {})",
+            path.display(),
+            backup_path.display()
+        )
+    })?;
+    Ok(true)
+}
+
+fn run_external_editor_for_file(path: &Path) -> Result<()> {
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
+
+    let mut args = shlex::split(&editor).unwrap_or_else(|| vec![editor.clone()]);
+    if args.is_empty() {
+        args.push("vi".to_string());
+    }
+    let program = args.remove(0);
+
+    let status = Command::new(&program)
+        .args(&args)
+        .arg(path)
+        .status()
+        .with_context(|| format!("Failed to launch editor command: {editor}"))?;
+
+    if !status.success() {
+        bail!("Editor exited with status: {}", status);
+    }
+
+    Ok(())
 }
 
 async fn handle_setting_change(app: &mut app::App, entry: ConfigEntry) -> Result<()> {
@@ -490,10 +739,13 @@ async fn commit_edit(app: &mut app::App) -> Result<()> {
     {
         match entry {
             ConfigEntry::MixedPort => {
-                if let Ok(port) = app.editing_value.parse::<u16>() {
-                    app.update_config(serde_json::json!({ "mixed-port": port }))
-                        .await?;
-                }
+                let port = app
+                    .editing_value
+                    .trim()
+                    .parse::<u16>()
+                    .with_context(|| "Mixed Port must be a number between 0 and 65535")?;
+                app.update_config(serde_json::json!({ "mixed-port": port }))
+                    .await?;
             }
             ConfigEntry::BindAddress => {
                 app.update_config(serde_json::json!({ "bind-address": app.editing_value }))
@@ -519,10 +771,16 @@ async fn commit_edit(app: &mut app::App) -> Result<()> {
                 app.trigger_latency_test();
             }
             ConfigEntry::TestTimeout => {
-                if let Ok(timeout) = app.editing_value.parse::<u64>() {
-                    app.app_settings.test_timeout = timeout;
-                    app.save_app_settings()?;
-                }
+                let timeout =
+                    app.editing_value.trim().parse::<u64>().with_context(
+                        || "Test Timeout must be a positive number of milliseconds",
+                    )?;
+                app.app_settings.test_timeout = timeout;
+                app.save_app_settings()?;
+            }
+            ConfigEntry::ConfigPath => {
+                let path = PathBuf::from(app.editing_value.trim());
+                switch_config_file(app, &path).await?;
             }
             _ => {}
         }
@@ -1079,8 +1337,30 @@ fn print_agent_block(endpoint: &str, secret: &str, note: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_trycloudflare_url, is_public_ipv4, is_usable_local_ipv4, parse_listen_addr,
+        apply_edited_config_file, expand_config_path, extract_trycloudflare_url, handle_nav_key,
+        handle_proxies_key, handle_settings_navigation_key, is_public_ipv4, is_usable_local_ipv4,
+        parse_listen_addr, switch_config_file,
     };
+    use anyhow::Result;
+    use crossterm::event::KeyCode;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    async fn spawn_status_server(status_line: &'static str) -> Result<String> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0_u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                let response = format!("{status_line}\r\nContent-Length: 0\r\n\r\n");
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+        Ok(format!("http://{addr}"))
+    }
 
     #[test]
     fn parse_listen_addr_handles_host_port_and_port_only() {
@@ -1094,6 +1374,212 @@ mod tests {
         );
         assert_eq!(parse_listen_addr("7070"), ("0.0.0.0".to_string(), 7070));
         assert_eq!(parse_listen_addr("[::]:9091"), ("::".to_string(), 9091));
+    }
+
+    #[test]
+    fn apply_edited_config_file_writes_valid_yaml_and_rejects_invalid_yaml() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "mihomot-apply-config-test-{}-{nanos}.yaml",
+            std::process::id()
+        ));
+        let initial = "mode: rule\nmixed-port: 7890\n";
+        fs::write(&path, initial).expect("test config should be writable");
+
+        let edited = "mode: global\nmixed-port: 7891\n";
+        let changed = apply_edited_config_file(&path, initial, edited)
+            .expect("valid edited config should be written");
+        assert!(changed);
+        assert_eq!(
+            fs::read_to_string(&path).expect("updated config should be readable"),
+            edited
+        );
+
+        let current = fs::read_to_string(&path).expect("current config should be readable");
+        let invalid = "mode: [\n";
+        let result = apply_edited_config_file(&path, &current, invalid);
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read_to_string(&path).expect("config should remain readable"),
+            current
+        );
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn switch_config_keeps_existing_control_endpoint() {
+        let server_url = spawn_status_server("HTTP/1.1 204 No Content")
+            .await
+            .expect("server should start");
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "mihomot-switch-config-{}-{nanos}.yaml",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            "mixed-port: 7890\nexternal-controller: 127.0.0.1:19090\nsecret: changed\n",
+        )
+        .expect("test config should be writable");
+
+        let mut app = crate::app::App::new(Some(server_url.clone()), Some("current".to_string()));
+        app.config_path = path.clone();
+
+        switch_config_file(&mut app, &path)
+            .await
+            .expect("config switch should call the existing control endpoint");
+
+        assert_eq!(app.app_settings.base_url, server_url);
+        assert_eq!(app.app_settings.api_secret, "current");
+        assert_eq!(
+            app.config_path,
+            path.canonicalize().expect("path should resolve")
+        );
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn expand_config_path_expands_home_prefix() {
+        let home = std::env::var("HOME").expect("HOME should be available in tests");
+
+        assert_eq!(
+            expand_config_path(std::path::Path::new("~/sub/config.yaml")),
+            std::path::PathBuf::from(home).join("sub/config.yaml")
+        );
+    }
+
+    #[tokio::test]
+    async fn proxies_left_from_groups_returns_to_navigation() {
+        let mut app = crate::app::App::new(None, None);
+        app.set_proxy_pane(crate::app::ProxyPane::Groups);
+
+        handle_proxies_key(&mut app, KeyCode::Left).await;
+
+        assert_eq!(app.focus, crate::app::Focus::Nav);
+        assert_eq!(app.proxy_pane, crate::app::ProxyPane::Groups);
+    }
+
+    #[tokio::test]
+    async fn settings_horizontal_keys_return_to_navigation() {
+        let mut app = crate::app::App::new(None, None);
+        app.set_route(crate::app::Route::Settings);
+
+        assert!(handle_settings_navigation_key(&mut app, KeyCode::Right));
+
+        assert_eq!(app.focus, crate::app::Focus::Nav);
+    }
+
+    #[tokio::test]
+    async fn nav_right_stays_in_sidebar_without_activating_highlighted_route() {
+        let mut app = crate::app::App::new(None, None);
+        app.next_nav();
+
+        assert!(!handle_nav_key(&mut app, KeyCode::Right));
+
+        assert_eq!(app.route, crate::app::Route::Dashboard);
+        assert_eq!(app.focus, crate::app::Focus::Nav);
+        assert_eq!(app.nav_index, 1);
+    }
+
+    #[tokio::test]
+    async fn nav_right_returns_to_active_route_content() {
+        let mut app = crate::app::App::new(None, None);
+        app.next_nav();
+        assert!(!handle_nav_key(&mut app, KeyCode::Enter));
+        assert_eq!(app.route, crate::app::Route::Proxies);
+        assert_eq!(app.focus, crate::app::Focus::Content);
+
+        handle_proxies_key(&mut app, KeyCode::Left).await;
+        assert_eq!(app.focus, crate::app::Focus::Nav);
+
+        assert!(!handle_nav_key(&mut app, KeyCode::Right));
+
+        assert_eq!(app.route, crate::app::Route::Proxies);
+        assert_eq!(app.focus, crate::app::Focus::Content);
+    }
+
+    #[tokio::test]
+    async fn nav_enter_activates_highlighted_route() {
+        let mut app = crate::app::App::new(None, None);
+        app.next_nav();
+
+        assert!(!handle_nav_key(&mut app, KeyCode::Enter));
+
+        assert_eq!(app.route, crate::app::Route::Proxies);
+        assert_eq!(app.focus, crate::app::Focus::Content);
+    }
+
+    #[tokio::test]
+    async fn refresh_order_keeps_proxy_latency_testing_visible() {
+        let mut app = crate::app::App::new(None, None);
+        app.group_names = vec!["Auto".to_string()];
+        app.group_state.select(Some(0));
+        app.proxies.insert(
+            "Auto".to_string(),
+            crate::app::ProxyItem {
+                name: Some("Auto".to_string()),
+                proxy_type: Some("Selector".to_string()),
+                now: Some("Node A".to_string()),
+                all: Some(vec!["Node A".to_string()]),
+                extra: serde_json::Map::new(),
+            },
+        );
+        app.proxy_latency.insert(
+            "Node A".to_string(),
+            crate::app::ProxyLatencyStatus::Success(120),
+        );
+
+        app.trigger_group_latency_test();
+
+        assert_eq!(
+            app.proxy_latency.get("Node A"),
+            Some(&crate::app::ProxyLatencyStatus::Testing)
+        );
+    }
+
+    #[tokio::test]
+    async fn selected_proxy_latency_test_marks_only_selected_node_as_testing() {
+        let mut app = crate::app::App::new(None, None);
+        app.group_names = vec!["Auto".to_string()];
+        app.group_state.select(Some(0));
+        app.proxy_state.select(Some(1));
+        app.proxies.insert(
+            "Auto".to_string(),
+            crate::app::ProxyItem {
+                name: Some("Auto".to_string()),
+                proxy_type: Some("Selector".to_string()),
+                now: Some("Node A".to_string()),
+                all: Some(vec!["Node A".to_string(), "Node B".to_string()]),
+                extra: serde_json::Map::new(),
+            },
+        );
+        app.proxy_latency.insert(
+            "Node A".to_string(),
+            crate::app::ProxyLatencyStatus::Success(120),
+        );
+        app.proxy_latency.insert(
+            "Node B".to_string(),
+            crate::app::ProxyLatencyStatus::Success(240),
+        );
+
+        app.trigger_selected_proxy_latency_test();
+
+        assert_eq!(
+            app.proxy_latency.get("Node A"),
+            Some(&crate::app::ProxyLatencyStatus::Success(120))
+        );
+        assert_eq!(
+            app.proxy_latency.get("Node B"),
+            Some(&crate::app::ProxyLatencyStatus::Testing)
+        );
     }
 
     #[test]

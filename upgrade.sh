@@ -146,9 +146,20 @@ install_systemd_service_if_present() {
   fi
 
   local service_file
-  service_file="$TMP_DIR/${SERVICE_NAME}.service"
+  local region_env
+  local existing_service
 
-  cat > "$service_file" <<EOF
+  service_file="$TMP_DIR/${SERVICE_NAME}.service"
+  existing_service="/etc/systemd/system/${SERVICE_NAME}.service"
+
+  # Preserve MIHOMOT_REGION from the existing service file if present
+  region_env=""
+  if as_root test -f "$existing_service"; then
+    region_env="$(as_root grep -E '^Environment="?MIHOMOT_REGION=' "$existing_service" 2>/dev/null | head -1 || true)"
+  fi
+
+  {
+    cat <<EOF
 [Unit]
 Description=mihomot API server
 After=network-online.target
@@ -156,6 +167,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+EOF
+    [ -n "$region_env" ] && printf '%s\n' "$region_env"
+    cat <<EOF
 ExecStart=${INSTALL_DIR}/${BIN_NAME} serve --config ${CONFIG_PATH}
 Restart=on-failure
 RestartSec=3
@@ -164,6 +178,7 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 EOF
+  } > "$service_file"
 
   info "updating systemd service: ${SERVICE_NAME}.service"
   as_root install -m 644 "$service_file" "/etc/systemd/system/${SERVICE_NAME}.service"
@@ -195,8 +210,8 @@ install_tui_settings() {
   fi
   [ -n "$target_home" ] || target_home="${HOME:-/root}"
 
-  secret="$(as_root awk -F ': *' '/^secret:/ {print $2; exit}' "$CONFIG_PATH" | tr -d '\"' || true)"
-  controller="$(as_root awk -F ': *' '/^external-controller:/ {print $2; exit}' "$CONFIG_PATH" | tr -d '\"' || true)"
+  secret="$(as_root awk '/^secret:/ {sub(/^secret:[[:space:]]*/, ""); sub(/[[:space:]]+#.*/, ""); sub(/[[:space:]]+$/, ""); print; exit}' "$CONFIG_PATH" | tr -d '\"' || true)"
+  controller="$(as_root awk '/^external-controller:/ {sub(/^external-controller:[[:space:]]*/, ""); sub(/[[:space:]]+#.*/, ""); sub(/[[:space:]]+$/, ""); print; exit}' "$CONFIG_PATH" | tr -d '\"' || true)"
   port="${controller##*:}"
   case "$port" in
     '' | *[!0-9]*)
