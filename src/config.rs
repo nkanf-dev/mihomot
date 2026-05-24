@@ -84,53 +84,61 @@ pub fn restore_from_backup(backup_path: &Path, target_path: &Path) -> Result<()>
 }
 
 /// Return selectable mihomo YAML config files from the active config directory.
-pub fn list_config_candidates(active_path: &Path) -> Result<Vec<ConfigCandidate>> {
+pub fn list_config_candidates(active_path: &Path) -> Result<Vec<(ConfigCandidate, MihomoConfig)>> {
     let base_dir = active_path
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    let mut paths = Vec::new();
+    let mut configs = Vec::new();
 
     if base_dir.exists() {
         for entry in fs::read_dir(&base_dir)? {
             let path = entry?.path();
-            if is_mihomo_config_file(&path) {
-                paths.push(path);
+            if let Some(config) = parse_if_mihomo_config_file(&path) {
+                configs.push((path, config));
             }
         }
     }
 
-    if is_mihomo_config_file(active_path) && !paths.contains(&active_path.to_path_buf()) {
-        paths.push(active_path.to_path_buf());
+    if let Some(config) = parse_if_mihomo_config_file(active_path) {
+        if !configs.iter().any(|(p, _)| p == active_path) {
+            configs.push((active_path.to_path_buf(), config));
+        }
     }
 
-    paths.sort_by(|left, right| {
-        left.file_name()
-            .cmp(&right.file_name())
-            .then_with(|| left.cmp(right))
+    configs.sort_by(|left, right| {
+        left.0.file_name()
+            .cmp(&right.0.file_name())
+            .then_with(|| left.0.cmp(&right.0))
     });
 
-    Ok(paths
+    Ok(configs
         .into_iter()
-        .map(|path| config_candidate_from_path(path, &base_dir))
+        .map(|(path, config)| (config_candidate_from_path(path, &base_dir), config))
         .collect())
 }
 
-/// Return true when a YAML file looks like a mihomo main config.
-pub fn is_mihomo_config_file(path: &Path) -> bool {
+
+
+fn parse_if_mihomo_config_file(path: &Path) -> Option<MihomoConfig> {
     if !is_yaml_file(path) {
-        return false;
+        return None;
     }
 
     let Ok(config) = read_config(path) else {
-        return false;
+        return None;
     };
 
-    config.external_controller.is_some()
+    if config.external_controller.is_some()
         || config.mixed_port.is_some()
         || config.extra.get("proxies").is_some()
         || config.extra.get("proxy-groups").is_some()
         || config.extra.get("rules").is_some()
+    {
+        Some(config)
+    } else {
+        None
+    }
 }
 
 /// Parse external-controller to get host and port
@@ -273,14 +281,14 @@ secret: test123
         let candidates = list_config_candidates(&active).expect("candidate listing should succeed");
         let paths: Vec<_> = candidates
             .iter()
-            .map(|candidate| candidate.path.clone())
+            .map(|(candidate, _)| candidate.path.clone())
             .collect();
 
         assert!(paths.contains(&active));
         assert!(paths.contains(&other));
         assert!(!paths.contains(&profiles));
         assert!(!paths.contains(&notes));
-        assert!(candidates.iter().any(|candidate| {
+        assert!(candidates.iter().any(|(candidate, _)| {
             candidate.path == active
                 && candidate.label == "active"
                 && candidate.detail == "active.yaml"

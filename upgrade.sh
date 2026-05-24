@@ -210,8 +210,8 @@ install_tui_settings() {
   fi
   [ -n "$target_home" ] || target_home="${HOME:-/root}"
 
-  secret="$(as_root awk '/^secret:/ {sub(/^secret:[[:space:]]*/, ""); print; exit}' "$CONFIG_PATH" | tr -d '\"' || true)"
-  controller="$(as_root awk '/^external-controller:/ {sub(/^external-controller:[[:space:]]*/, ""); print; exit}' "$CONFIG_PATH" | tr -d '\"' || true)"
+  secret="$(as_root awk '/^secret:/ {sub(/^secret:[[:space:]]*/, ""); sub(/#.*/, ""); sub(/[[:space:]]+$/, ""); print; exit}' "$CONFIG_PATH" | tr -d '\"' || true)"
+  controller="$(as_root awk '/^external-controller:/ {sub(/^external-controller:[[:space:]]*/, ""); sub(/#.*/, ""); sub(/[[:space:]]+$/, ""); print; exit}' "$CONFIG_PATH" | tr -d '\"' || true)"
   port="${controller##*:}"
   case "$port" in
     '' | *[!0-9]*)

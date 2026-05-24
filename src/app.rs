@@ -415,7 +415,10 @@ impl App {
 
     /// Refresh selectable mihomo YAML config files from the active config directory.
     pub fn refresh_config_candidates(&mut self) -> Result<()> {
-        let candidates = crate::config::list_config_candidates(&self.config_path)?;
+        let candidates = crate::config::list_config_candidates(&self.config_path)?
+            .into_iter()
+            .map(|(c, _)| c)
+            .collect::<Vec<_>>();
         let selected = candidates
             .iter()
             .position(|candidate| candidate.path == self.config_path)
@@ -587,7 +590,7 @@ impl App {
 
     async fn try_mihomot_config_switch(&self, path: &Path) -> Result<bool> {
         let url = format!("{}/mhmt/config/switch", self.app_settings.base_url);
-        let body = serde_json::json!({ "path": path });
+        let body = serde_json::json!({ "path": path.display().to_string() });
         let mut request = self.client.post(&url).json(&body);
 
         if !self.app_settings.api_secret.is_empty() {

@@ -92,7 +92,8 @@ async fn get_config_list(State(state): State<Arc<AppState>>, headers: HeaderMap)
         Ok(configs) => {
             let configs = configs
                 .into_iter()
-                .filter(|candidate| validate_switch_target(&state, &candidate.path).is_ok())
+                .filter(|(candidate, parsed)| validate_switch_target_config(&state, &candidate.path, parsed).is_ok())
+                .map(|(candidate, _)| candidate)
                 .collect::<Vec<_>>();
             let body = serde_json::json!({
                 "active": active_path,
@@ -188,7 +189,8 @@ async fn post_config_raw(
         return unauthorized();
     }
 
-    let config_path = state.config_path.read().await.clone();
+    let config_path_lock = state.config_path.write().await;
+    let config_path = config_path_lock.clone();
 
     // Backup before writing
     let backup_path = match config::backup_config(&config_path) {
@@ -414,7 +416,7 @@ fn resolve_switch_target(current_path: &Path, requested_path: &str) -> anyhow::R
     }
 
     let candidates = config::list_config_candidates(current_path)?;
-    if !candidates.iter().any(|candidate| {
+    if !candidates.iter().any(|(candidate, _)| {
         std::fs::canonicalize(&candidate.path)
             .map(|path| path == target)
             .unwrap_or(false)
@@ -430,7 +432,10 @@ fn resolve_switch_target(current_path: &Path, requested_path: &str) -> anyhow::R
 
 fn validate_switch_target(state: &AppState, target_path: &Path) -> anyhow::Result<()> {
     let target_config = config::read_config(target_path)?;
+    validate_switch_target_config(state, target_path, &target_config)
+}
 
+fn validate_switch_target_config(state: &AppState, _target_path: &Path, target_config: &config::MihomoConfig) -> anyhow::Result<()> {
     let target_secret = target_config.secret.as_deref().unwrap_or_default();
     if target_secret != state.secret {
         anyhow::bail!(
@@ -438,7 +443,7 @@ fn validate_switch_target(state: &AppState, target_path: &Path) -> anyhow::Resul
         );
     }
 
-    if !target_endpoint_matches_current(&state.mihomo_endpoint, &target_config) {
+    if !target_endpoint_matches_current(&state.mihomo_endpoint, target_config) {
         anyhow::bail!(
             "Target config external-controller does not match the running mihomo endpoint {}; edit it first or restart mihomot with the target config",
             state.mihomo_endpoint

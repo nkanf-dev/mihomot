@@ -665,23 +665,24 @@ fn run_external_editor_for_file(path: &Path) -> Result<()> {
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
         .unwrap_or_else(|_| "vi".to_string());
-    let command = format!("{} {}", editor, shell_quote_path(path));
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(&command)
+        
+    let mut args = shlex::split(&editor).unwrap_or_else(|| vec![editor.clone()]);
+    if args.is_empty() {
+        args.push("vi".to_string());
+    }
+    let program = args.remove(0);
+
+    let status = Command::new(&program)
+        .args(&args)
+        .arg(path)
         .status()
-        .with_context(|| format!("Failed to launch editor command: {command}"))?;
+        .with_context(|| format!("Failed to launch editor command: {editor}"))?;
 
     if !status.success() {
         bail!("Editor exited with status: {}", status);
     }
 
     Ok(())
-}
-
-fn shell_quote_path(path: &Path) -> String {
-    let text = path.to_string_lossy();
-    format!("'{}'", text.replace('\'', "'\\''"))
 }
 
 fn unique_temp_config_path(path: &Path) -> PathBuf {
