@@ -9,8 +9,7 @@ use ratatui::{
 };
 
 use crate::app::{
-    App, ConfigEntry, Focus, NAV_ITEMS, ProxyItem, ProxyLatencyStatus, ProxyPane,
-    RealLatencyStatus, Route,
+    App, ConfigEntry, Focus, NAV_ITEMS, ProxyItem, ProxyLatencyStatus, ProxyPane, Route,
 };
 
 struct Theme;
@@ -351,12 +350,8 @@ fn draw_latency_gauge(f: &mut Frame, app: &App, area: Rect) {
             )
         }
         Some(ProxyLatencyStatus::Failed(msg)) => (format!("Err: {msg}"), Theme::BAD, 100),
-        None => match &app.real_latency_status {
-            RealLatencyStatus::Pending => ("No node latency".to_string(), Theme::MUTED, 0),
-            RealLatencyStatus::Testing => ("No node latency".to_string(), Theme::MUTED, 0),
-            RealLatencyStatus::Success(_) => ("No node latency".to_string(), Theme::MUTED, 0),
-            RealLatencyStatus::Failed(_) => ("No node latency".to_string(), Theme::MUTED, 0),
-        },
+        None if selected_proxy_name.is_some() => ("Untested".to_string(), Theme::MUTED, 0),
+        None => ("No node selected".to_string(), Theme::MUTED, 0),
     };
 
     let title = selected_proxy_name
@@ -446,7 +441,8 @@ fn draw_proxies_page(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_group_cards(f: &mut Frame, app: &mut App, area: Rect) {
     let selected_idx = app.group_state.selected();
-    let items: Vec<ListItem<'static>> = app
+    let proxy_pane = app.proxy_pane;
+    let items: Vec<ListItem<'_>> = app
         .group_names
         .iter()
         .enumerate()
@@ -455,18 +451,14 @@ fn draw_group_cards(f: &mut Frame, app: &mut App, area: Rect) {
             let group = app.proxies.get(name);
             let ptype = group
                 .and_then(|item| item.proxy_type.as_deref())
-                .unwrap_or("Group")
-                .to_string();
+                .unwrap_or("Group");
             let count = group.and_then(|item| item.all.as_ref()).map_or(0, Vec::len);
-            let now = group
-                .and_then(|item| item.now.as_deref())
-                .unwrap_or("-")
-                .to_string();
-            let style = card_text_style(selected, app.proxy_pane == ProxyPane::Groups);
+            let now = group.and_then(|item| item.now.as_deref()).unwrap_or("-");
+            let style = card_text_style(selected, proxy_pane == ProxyPane::Groups);
             ListItem::new(vec![
                 Line::from(vec![
                     Span::styled(if selected { "> " } else { "  " }, style),
-                    Span::styled(name.clone(), style.add_modifier(Modifier::BOLD)),
+                    Span::styled(name.as_str(), style.add_modifier(Modifier::BOLD)),
                 ]),
                 Line::from(vec![
                     Span::styled("  type ", Style::default().fg(Theme::MUTED)),
@@ -504,36 +496,35 @@ fn draw_group_cards(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_proxy_cards(f: &mut Frame, app: &mut App, area: Rect) {
     let selected_proxy = app.proxy_state.selected();
-    let selected_group_name = app.get_selected_group_name().cloned();
+    let selected_group_name = app.get_selected_group_name();
     let (current_proxy, proxy_names) = selected_group_name
-        .as_ref()
         .and_then(|group_name| app.proxies.get(group_name))
         .map(|group| {
             (
-                group.now.clone(),
-                group.all.as_ref().cloned().unwrap_or_default(),
+                group.now.as_deref(),
+                group.all.as_deref().unwrap_or_default(),
             )
         })
         .unwrap_or_default();
+    let proxy_pane = app.proxy_pane;
 
-    let items: Vec<ListItem<'static>> = proxy_names
+    let items: Vec<ListItem<'_>> = proxy_names
         .iter()
         .enumerate()
         .map(|(idx, name)| {
             let selected = selected_proxy == Some(idx);
-            let current = current_proxy.as_ref() == Some(name);
+            let current = current_proxy == Some(name.as_str());
             let proxy = app.proxies.get(name);
             let ptype = proxy
                 .and_then(|item| item.proxy_type.as_deref())
-                .unwrap_or("Proxy")
-                .to_string();
+                .unwrap_or("Proxy");
             let latency = app.proxy_latency.get(name);
             let (latency_text, latency_style) = proxy_latency_display(latency);
-            let style = card_text_style(selected, app.proxy_pane == ProxyPane::Proxies);
+            let style = card_text_style(selected, proxy_pane == ProxyPane::Proxies);
             ListItem::new(vec![
                 Line::from(vec![
                     Span::styled(if selected { "> " } else { "  " }, style),
-                    Span::styled(name.clone(), style.add_modifier(Modifier::BOLD)),
+                    Span::styled(name.as_str(), style.add_modifier(Modifier::BOLD)),
                     Span::raw(" "),
                     Span::styled(
                         if current { "[active]" } else { "" },
@@ -1235,6 +1226,8 @@ mod tests {
     async fn dashboard_shows_selected_node_latency() {
         let mut app = test_app();
         app.set_route(Route::Dashboard);
+        app.group_state.select(Some(0));
+        app.proxy_state.select(Some(0));
         app.proxy_latency
             .insert("Node A".to_string(), ProxyLatencyStatus::Testing);
 

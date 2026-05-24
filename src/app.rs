@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
 use futures_util::StreamExt;
-use ratatui::widgets::ListState;
+use ratatui::widgets::{ListState, TableState};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -214,7 +214,7 @@ pub struct App {
     pub config_candidates: Vec<crate::config::ConfigCandidate>,
     pub config_picker_state: ListState,
     pub settings_items: Vec<ConfigEntry>,
-    pub settings_state: ratatui::widgets::TableState,
+    pub settings_state: TableState,
     pub is_editing: bool,
     pub editing_value: String,
 
@@ -238,7 +238,7 @@ impl App {
         group_state.select(Some(0));
         proxy_state.select(Some(0));
 
-        let mut settings_state = ratatui::widgets::TableState::default();
+        let mut settings_state = TableState::default();
         settings_state.select(Some(0));
         let mut config_picker_state = ListState::default();
         config_picker_state.select(Some(0));
