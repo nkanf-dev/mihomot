@@ -13,6 +13,8 @@ mod server;
 mod token;
 mod ui;
 
+const TUI_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
 #[derive(Parser, Debug)]
 #[command(version, about = "mihomot - AI native mihomo manager")]
 struct Args {
@@ -273,7 +275,7 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App) ->
             app.on_traffic(traffic);
         }
 
-        if event::poll(std::time::Duration::from_millis(100))? {
+        if event::poll(TUI_FRAME_INTERVAL)? {
             let key = match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => key,
                 Event::Resize(_, _) => {
