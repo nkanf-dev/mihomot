@@ -1,0 +1,34 @@
+changelog:
+  exclude:
+    labels:
+      - duplicate
+      - invalid
+      - wontfix
+      - question
+    authors:
+      - octocat
+  categories:
+    - title: "Features"
+      labels:
+        - enhancement
+        - feature
+    - title: "Bug Fixes"
+      labels:
+        - bug
+        - fix
+    - title: "Documentation"
+      labels:
+        - documentation
+        - docs
+    - title: "Testing"
+      labels:
+        - test
+    - title: "Maintenance"
+      labels:
+        - chore
+        - dependencies
+    - title: "Dependency Updates"
+      labels:
+        - dependencies
+  render:
+    compact: true
