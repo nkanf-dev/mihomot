@@ -203,6 +203,17 @@ All `/mhmt/` endpoints require auth: `Authorization: Bearer {secret}` (same secr
 | GET | `/mhmt/status` | Status: version, mode, connection count |
 | GET | `/skill.md` | AI agent skill document |
 
+For multi-subscription setups, keep switchable mihomo YAML files in the
+same directory as the active config. For example, if mihomot is running with
+`/etc/mihomo/config.yaml`, place alternatives such as `/etc/mihomo/us.yaml`
+and `/etc/mihomo/hk.yaml` beside it. `/mhmt/config/list` only scans that
+active config directory and includes files that look like mihomo main configs,
+for example YAML files containing `external-controller`, `mixed-port`,
+`proxies`, `proxy-groups`, or `rules`. `/mhmt/config/switch` rejects paths
+outside the active config directory, non-mihomo YAML, and configs whose
+`secret` or `external-controller` are incompatible with the running mihomot
+service.
+
 Mihomo native API endpoints (`/proxies`, `/rules`, `/configs`, etc.) can be called through the same mihomot address. Unknown non-`/mhmt/` paths are proxied to mihomo with the same bearer token.
 
 ## Token Format

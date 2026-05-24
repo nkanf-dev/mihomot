@@ -202,7 +202,7 @@ pub struct App {
 
     pub group_names: Vec<String>,
     pub group_state: ListState,
-    pub proxy_state: TableState,
+    pub proxy_state: ListState,
     pub route: Route,
     pub focus: Focus,
     pub nav_index: usize,
@@ -234,7 +234,7 @@ struct ProxyLatencyTestContext {
 impl App {
     pub fn new(url_override: Option<String>, secret_override: Option<String>) -> Self {
         let mut group_state = ListState::default();
-        let mut proxy_state = TableState::default();
+        let mut proxy_state = ListState::default();
         group_state.select(Some(0));
         proxy_state.select(Some(0));
 

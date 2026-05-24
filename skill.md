@@ -84,7 +84,7 @@ mihomo API 的 endpoint 和 secret 与 mihomot 相同。高级场景下也可以
 
 ### 4.3 多配置文件切换
 
-服务器可能在同一个 mihomo 配置目录下保存多个可切换 YAML。切换时：
+服务器可能在同一个 mihomo 配置目录下保存多个可切换 YAML。推荐把所有订阅主配置都放在当前 active config 同目录，例如 active config 是 `/etc/mihomo/config.yaml` 时，把 `/etc/mihomo/us.yaml`、`/etc/mihomo/hk.yaml` 等文件放在同一目录。切换时：
 
 ```
 1. GET /mhmt/config/list
@@ -93,7 +93,9 @@ mihomo API 的 endpoint 和 secret 与 mihomot 相同。高级场景下也可以
 4. GET /mhmt/status 确认 config_path、mode 和 alive 状态
 ```
 
-`/mhmt/config/switch` 只允许切换到当前 active config 同目录下的 mihomo 主配置文件。目标配置的 `secret` 和 `external-controller` 端口必须与当前 mihomot 启动时使用的配置兼容；否则需要先编辑目标配置，或让用户用目标配置重启 mihomot。
+`/mhmt/config/list` 只扫描当前 active config 同目录。一个 YAML 需要看起来像 mihomo 主配置才会出现在列表里：通常应包含 `external-controller`、`mixed-port`、`proxies`、`proxy-groups` 或 `rules` 等字段之一；类似 `current/items` 这种订阅元数据文件不会被当作可切换主配置。
+
+`/mhmt/config/switch` 只允许切换到当前 active config 同目录下的 mihomo 主配置文件。目标配置的 `secret` 和 `external-controller` 必须与当前 mihomot 启动时使用的配置兼容；否则需要先编辑目标配置，或让用户用目标配置重启 mihomot。
 
 ### 4.4 操作前检查
 
