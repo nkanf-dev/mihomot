@@ -141,16 +141,10 @@ pub fn start(runtime: &RuntimeMode, config_path: &Path) -> Result<()> {
             // Use status() to wait for process to be ready, then detach
             // mihomo daemonizes itself with -d flag, so status() returns once it forks
             Command::new(path)
-                .args([
-                    "-d",
-                    config_path
-                        .parent()
-                        .unwrap_or(Path::new("."))
-                        .to_str()
-                        .unwrap_or("."),
-                    "-f",
-                    config_path.to_str().unwrap_or("config.yaml"),
-                ])
+                .arg("-d")
+                .arg(config_path.parent().unwrap_or(Path::new(".")))
+                .arg("-f")
+                .arg(config_path)
                 .status()
                 .context("Failed to start mihomo binary")?;
         }

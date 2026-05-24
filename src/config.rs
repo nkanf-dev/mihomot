@@ -19,6 +19,7 @@ pub struct MihomoConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfigCandidate {
+    #[serde(skip)]
     pub path: PathBuf,
     pub label: String,
     pub detail: String,
@@ -100,14 +101,15 @@ pub fn list_config_candidates(active_path: &Path) -> Result<Vec<(ConfigCandidate
         }
     }
 
-    if let Some(config) = parse_if_mihomo_config_file(active_path) {
-        if !configs.iter().any(|(p, _)| p == active_path) {
-            configs.push((active_path.to_path_buf(), config));
-        }
+    if let Some(config) = parse_if_mihomo_config_file(active_path)
+        && !configs.iter().any(|(p, _)| p == active_path)
+    {
+        configs.push((active_path.to_path_buf(), config));
     }
 
     configs.sort_by(|left, right| {
-        left.0.file_name()
+        left.0
+            .file_name()
             .cmp(&right.0.file_name())
             .then_with(|| left.0.cmp(&right.0))
     });
@@ -152,7 +154,7 @@ pub fn parse_external_controller(ec: &str) -> (String, u16) {
 }
 
 fn is_yaml_file(path: &Path) -> bool {
-    path.is_file()
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file())
         && matches!(
             path.extension().and_then(|extension| extension.to_str()),
             Some("yaml" | "yml")

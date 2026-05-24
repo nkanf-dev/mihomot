@@ -221,7 +221,7 @@ fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_dashboard(f: &mut Frame, app: &App, area: Rect) {
     let inner_area = draw_content_outline(f, app, area, " Dashboard ");
-    
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
@@ -413,7 +413,7 @@ fn draw_traffic_sparklines(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_proxies_page(f: &mut Frame, app: &App, area: Rect) {
     let inner_area = draw_content_outline(f, app, area, " Proxies ");
-    
+
     let direction = if area.width < 90 {
         Direction::Vertical
     } else {
@@ -758,7 +758,10 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         ]),
         Line::from(""),
         Line::from(vec![
-            Span::styled("Navigation: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Navigation: ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
             Span::raw("Use "),
             Span::styled("j/k", Theme::ACCENT_ALT),
             Span::raw(" or "),
@@ -768,7 +771,10 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
             Span::raw(" to activate."),
         ]),
         Line::from(vec![
-            Span::styled("Sidebar:    ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Sidebar:    ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
             Span::raw("Use "),
             Span::styled("h/l", Theme::ACCENT_ALT),
             Span::raw(" or "),
@@ -776,7 +782,10 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
             Span::raw(" to switch between Sidebar and Content."),
         ]),
         Line::from(vec![
-            Span::styled("Actions:    ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Actions:    ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
             Span::styled("e", Theme::ACCENT_ALT),
             Span::raw(" to edit config. "),
             Span::styled("t", Theme::ACCENT_ALT),

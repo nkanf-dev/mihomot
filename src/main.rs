@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+
 
 mod app;
 mod config;
@@ -630,10 +630,7 @@ fn edit_config_file_on_disk(path: &Path) -> Result<bool> {
     }
 
     let initial = config::read_raw(path)?;
-    let extension = path
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("yaml");
+    let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("yaml");
 
     let mut temp_file = tempfile::Builder::new()
         .prefix("mihomot_config_")
@@ -642,7 +639,8 @@ fn edit_config_file_on_disk(path: &Path) -> Result<bool> {
         .with_context(|| "Failed to securely create temp editor file")?;
 
     use std::io::Write;
-    temp_file.write_all(initial.as_bytes())
+    temp_file
+        .write_all(initial.as_bytes())
         .with_context(|| "Failed to write initial content to temp editor file")?;
     temp_file.flush()?;
 
@@ -650,13 +648,11 @@ fn edit_config_file_on_disk(path: &Path) -> Result<bool> {
     let temp_path = temp_path_keeper.to_path_buf();
 
     let editor_result = run_external_editor_for_file(&temp_path);
-    if let Err(err) = editor_result {
-        return Err(err);
-    }
+    editor_result?;
 
     let edited = fs::read_to_string(&temp_path)
         .with_context(|| format!("Failed to read edited temp file {}", temp_path.display()))?;
-    
+
     drop(temp_path_keeper);
 
     apply_edited_config_file(path, &initial, &edited)
@@ -671,8 +667,13 @@ fn apply_edited_config_file(path: &Path, initial: &str, edited: &str) -> Result<
         .with_context(|| "Edited mihomo config is not valid YAML/config")?;
 
     let backup_path = config::backup_config(path)?;
-    config::write_raw(path, edited)
-        .with_context(|| format!("Failed to write edited config to {} (backup saved at {})", path.display(), backup_path.display()))?;
+    config::write_raw(path, edited).with_context(|| {
+        format!(
+            "Failed to write edited config to {} (backup saved at {})",
+            path.display(),
+            backup_path.display()
+        )
+    })?;
     Ok(true)
 }
 
@@ -680,7 +681,7 @@ fn run_external_editor_for_file(path: &Path) -> Result<()> {
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
         .unwrap_or_else(|_| "vi".to_string());
-        
+
     let mut args = shlex::split(&editor).unwrap_or_else(|| vec![editor.clone()]);
     if args.is_empty() {
         args.push("vi".to_string());
@@ -698,23 +699,6 @@ fn run_external_editor_for_file(path: &Path) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn unique_temp_config_path(path: &Path) -> PathBuf {
-    let extension = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or("yaml");
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    std::env::temp_dir().join(format!(
-        "mihomot-config-edit-{}-{}.{}",
-        std::process::id(),
-        nanos,
-        extension
-    ))
 }
 
 async fn handle_setting_change(app: &mut app::App, entry: ConfigEntry) -> Result<()> {
@@ -867,7 +851,6 @@ mod tests {
     use super::{
         apply_edited_config_file, expand_config_path, handle_nav_key, handle_proxies_key,
         handle_settings_navigation_key, parse_listen_addr, switch_config_file,
-        unique_temp_config_path,
     };
     use anyhow::Result;
     use crossterm::event::KeyCode;
@@ -936,15 +919,6 @@ mod tests {
         );
 
         let _ = fs::remove_file(&path);
-    }
-
-    #[test]
-    fn unique_temp_config_path_preserves_extension() {
-        let path = unique_temp_config_path(std::path::Path::new("/tmp/config.yaml"));
-        assert_eq!(
-            path.extension().and_then(|value| value.to_str()),
-            Some("yaml")
-        );
     }
 
     #[tokio::test]

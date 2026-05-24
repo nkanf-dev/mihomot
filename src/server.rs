@@ -1,3 +1,4 @@
+use crate::config;
 use axum::{
     Router,
     body::Bytes,
@@ -9,7 +10,6 @@ use axum::{
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use crate::config;
 
 #[derive(Clone)]
 struct AppState {
@@ -98,16 +98,24 @@ async fn get_config_list(State(state): State<Arc<AppState>>, headers: HeaderMap)
         let candidates = config::list_config_candidates(&active_path_for_task)?;
         let filtered = candidates
             .into_iter()
-            .filter(|(candidate, parsed)| validate_switch_target_config(&state_clone, &candidate.path, parsed).is_ok())
+            .filter(|(candidate, parsed)| {
+                validate_switch_target_config(&state_clone, &candidate.path, parsed).is_ok()
+            })
             .map(|(candidate, _)| candidate)
             .collect::<Vec<_>>();
         Ok::<_, anyhow::Error>(filtered)
-    }).await.unwrap_or_else(|e| Err(anyhow::anyhow!("Join error: {}", e)));
+    })
+    .await
+    .unwrap_or_else(|e| {
+        eprintln!("Join error listing configs: {}", e);
+        Err(anyhow::anyhow!("Internal server error scanning configurations"))
+    });
 
     match scan_result {
         Ok(configs) => {
+            let active_id = active_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             let body = serde_json::json!({
-                "active": active_path,
+                "active": active_id,
                 "configs": configs,
             });
             (StatusCode::OK, axum::Json(body)).into_response()
@@ -140,7 +148,12 @@ async fn post_config_switch(
         let target_path = resolve_switch_target(&current_path, &payload_path)?;
         validate_switch_target(&state_clone, &target_path)?;
         Ok::<_, anyhow::Error>(target_path)
-    }).await.unwrap_or_else(|e| Err(anyhow::anyhow!("Validation task failed: {}", e)));
+    })
+    .await
+    .unwrap_or_else(|e| {
+        eprintln!("Validation task panic: {}", e);
+        Err(anyhow::anyhow!("Validation failed due to an internal error"))
+    });
 
     let target_path = match validation_result {
         Ok(path) => path,
@@ -208,19 +221,28 @@ async fn post_config_raw(
     }
 
     if let Err(e) = serde_yaml::from_str::<serde_yaml::Value>(&body) {
-        return (StatusCode::BAD_REQUEST, format!("Invalid YAML config: {}", e)).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid YAML config: {}", e),
+        )
+            .into_response();
     }
 
     let _mutation_guard = state.mutation_lock.lock().await;
     let config_path = state.config_path.read().await.clone();
 
     let config_path_for_task = config_path.clone();
-    
+
     let disk_result = tokio::task::spawn_blocking(move || {
         let backup_path = config::backup_config(&config_path_for_task)?;
         config::write_raw(&config_path_for_task, &body)?;
         Ok::<_, anyhow::Error>(backup_path)
-    }).await.unwrap_or_else(|e| Err(anyhow::anyhow!("Disk IO task failed: {}", e)));
+    })
+    .await
+    .unwrap_or_else(|e| {
+        eprintln!("Disk IO task panic: {}", e);
+        Err(anyhow::anyhow!("Internal server error during disk operation"))
+    });
 
     let backup_path = match disk_result {
         Ok(path) => path,
@@ -450,7 +472,11 @@ fn validate_switch_target(state: &AppState, target_path: &Path) -> anyhow::Resul
     validate_switch_target_config(state, target_path, &target_config)
 }
 
-fn validate_switch_target_config(state: &AppState, _target_path: &Path, target_config: &config::MihomoConfig) -> anyhow::Result<()> {
+fn validate_switch_target_config(
+    state: &AppState,
+    _target_path: &Path,
+    target_config: &config::MihomoConfig,
+) -> anyhow::Result<()> {
     let target_secret = target_config.secret.as_deref().unwrap_or_default();
     if target_secret != state.secret {
         anyhow::bail!(
@@ -472,7 +498,7 @@ fn target_endpoint_matches_current(endpoint: &str, target_config: &config::Mihom
     let Some(external_controller) = target_config.external_controller.as_deref() else {
         return false;
     };
-    
+
     let (endpoint_host, endpoint_port) = parse_endpoint_host_port(endpoint);
     let endpoint_host_port = if let Some(p) = endpoint_port {
         format!("{}:{}", endpoint_host, p)
@@ -501,16 +527,15 @@ fn parse_endpoint_host_port(endpoint: &str) -> (String, Option<u16>) {
         .unwrap_or(endpoint);
     let host_port = without_scheme.split('/').next().unwrap_or(without_scheme);
 
-    if host_port.starts_with('[') {
-        if let Some(closing_bracket) = host_port.find(']') {
-            let host = &host_port[1..closing_bracket];
-            let remainder = &host_port[closing_bracket + 1..];
-            if remainder.starts_with(':') {
-                let port_str = &remainder[1..];
-                return (host.to_string(), port_str.parse::<u16>().ok());
-            } else {
-                return (host.to_string(), None);
-            }
+    if host_port.starts_with('[')
+        && let Some(closing_bracket) = host_port.find(']')
+    {
+        let host = &host_port[1..closing_bracket];
+        let remainder = &host_port[closing_bracket + 1..];
+        if let Some(port_str) = remainder.strip_prefix(':') {
+            return (host.to_string(), port_str.parse::<u16>().ok());
+        } else {
+            return (host.to_string(), None);
         }
     }
 
@@ -743,14 +768,26 @@ mod tests {
 
     #[test]
     fn parse_endpoint_host_port_handles_urls_and_ipv6() {
-        assert_eq!(parse_endpoint_host_port("http://127.0.0.1:9090"), ("127.0.0.1".to_string(), Some(9090)));
+        assert_eq!(
+            parse_endpoint_host_port("http://127.0.0.1:9090"),
+            ("127.0.0.1".to_string(), Some(9090))
+        );
         assert_eq!(
             parse_endpoint_host_port("https://example.com:9443/x"),
             ("example.com".to_string(), Some(9443))
         );
-        assert_eq!(parse_endpoint_host_port("http://example.com"), ("example.com".to_string(), None));
-        assert_eq!(parse_endpoint_host_port("http://[::1]:9090"), ("::1".to_string(), Some(9090)));
-        assert_eq!(parse_endpoint_host_port("http://[::1]"), ("::1".to_string(), None));
+        assert_eq!(
+            parse_endpoint_host_port("http://example.com"),
+            ("example.com".to_string(), None)
+        );
+        assert_eq!(
+            parse_endpoint_host_port("http://[::1]:9090"),
+            ("::1".to_string(), Some(9090))
+        );
+        assert_eq!(
+            parse_endpoint_host_port("http://[::1]"),
+            ("::1".to_string(), None)
+        );
     }
 
     #[tokio::test]
