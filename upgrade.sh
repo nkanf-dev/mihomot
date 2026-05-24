@@ -6,6 +6,7 @@ BIN_NAME="mihomot"
 INSTALL_DIR="${MIHOMOT_INSTALL_DIR:-/usr/local/bin}"
 CONFIG_PATH="${MIHOMOT_CONFIG:-/etc/mihomo/config.yaml}"
 SERVICE_NAME="${MIHOMOT_SERVICE_NAME:-mihomot}"
+SKILL_UPDATED=0
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -39,6 +40,31 @@ as_root() {
 
 need_cmd() {
   has_cmd "$1" || die "missing required command: $1"
+}
+
+capture_current_skill() {
+  local output_file="$1"
+
+  if ! has_cmd systemctl || [ ! -d /run/systemd/system ]; then
+    return
+  fi
+
+  if ! as_root systemctl is-active --quiet "${SERVICE_NAME}.service"; then
+    return
+  fi
+
+  curl -fsSL --connect-timeout 2 --max-time 5 "http://127.0.0.1:9091/skill.md" > "$output_file" \
+    2>/dev/null || true
+}
+
+detect_skill_update() {
+  local previous_skill="$1"
+  local new_skill="$2"
+
+  if [ -s "$previous_skill" ] && [ -f "$new_skill" ] && ! cmp -s "$previous_skill" "$new_skill"; then
+    SKILL_UPDATED=1
+    info "detected skill.md update; agent instructions will ask for a skill refresh"
+  fi
 }
 
 detect_target() {
@@ -245,10 +271,13 @@ print_agent_instructions() {
     return
   fi
 
+  local block
+
   info "waiting for mihomot agent instructions"
   wait_attempt=1
   while [ "$wait_attempt" -le 60 ]; do
-    if as_root journalctl -u "${SERVICE_NAME}.service" --since "2 minutes ago" -n 200 --no-pager \
+    if block="$(
+      as_root journalctl -u "${SERVICE_NAME}.service" --since "2 minutes ago" -n 200 --no-pager \
       | awk '
         /━━━━━━━━/ && !capture {last_sep=$0}
         /把这段话发给你的 AI agent:/ {
@@ -273,7 +302,14 @@ print_agent_instructions() {
           }
           exit 1
         }
-      '; then
+      '
+    )"; then
+      if [ "$SKILL_UPDATED" = "1" ]; then
+        printf '%s' "$block" \
+          | sed 's#如果没有安装skill先安装这个skill:#请先让你的 AI agent 安装或更新这个skill:#'
+      else
+        printf '%s' "$block"
+      fi
       return
     fi
     sleep 1
@@ -298,6 +334,8 @@ main() {
   local archive
   local checksum
   local binary_path
+  local previous_skill
+  local new_skill
   local ranked_prefixes
 
   target="$(detect_target)"
@@ -314,6 +352,7 @@ main() {
   archive="$TMP_DIR/${package}.tar.gz"
   checksum="$TMP_DIR/${package}.tar.gz.sha256"
   ranked_prefixes="$TMP_DIR/github-prefixes-ranked.txt"
+  previous_skill="$TMP_DIR/current-skill.md"
 
   rank_github_prefixes "${release_base}/${package}.tar.gz.sha256" "$ranked_prefixes"
   download_with_ranked_prefixes "${release_base}/${package}.tar.gz" "$archive" "$ranked_prefixes"
@@ -322,9 +361,13 @@ main() {
   info "verifying checksum"
   (cd "$TMP_DIR" && sha256sum -c "${package}.tar.gz.sha256")
 
+  capture_current_skill "$previous_skill"
   tar -xzf "$archive" -C "$TMP_DIR"
   binary_path="$(find "$TMP_DIR" -type f -path "*/${BIN_NAME}" -perm -u+x | head -n 1)"
+  new_skill="$(find "$TMP_DIR" -type f -path "*/skill.md" | head -n 1)"
   [ -n "$binary_path" ] || die "downloaded archive did not contain an executable ${BIN_NAME}"
+  [ -n "$new_skill" ] || die "downloaded archive did not contain skill.md"
+  detect_skill_update "$previous_skill" "$new_skill"
 
   if as_root test -x "${INSTALL_DIR}/${BIN_NAME}"; then
     info "current version: $(${INSTALL_DIR}/${BIN_NAME} --version 2>/dev/null || true)"
