@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
 use futures_util::StreamExt;
-use ratatui::widgets::{ListState, TableState};
+use ratatui::widgets::ListState;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -202,7 +202,7 @@ pub struct App {
 
     pub group_names: Vec<String>,
     pub group_state: ListState,
-    pub proxy_state: TableState,
+    pub proxy_state: ListState,
     pub route: Route,
     pub focus: Focus,
     pub nav_index: usize,
@@ -214,7 +214,7 @@ pub struct App {
     pub config_candidates: Vec<crate::config::ConfigCandidate>,
     pub config_picker_state: ListState,
     pub settings_items: Vec<ConfigEntry>,
-    pub settings_state: TableState,
+    pub settings_state: ratatui::widgets::TableState,
     pub is_editing: bool,
     pub editing_value: String,
 
@@ -234,11 +234,11 @@ struct ProxyLatencyTestContext {
 impl App {
     pub fn new(url_override: Option<String>, secret_override: Option<String>) -> Self {
         let mut group_state = ListState::default();
-        let mut proxy_state = TableState::default();
+        let mut proxy_state = ListState::default();
         group_state.select(Some(0));
         proxy_state.select(Some(0));
 
-        let mut settings_state = TableState::default();
+        let mut settings_state = ratatui::widgets::TableState::default();
         settings_state.select(Some(0));
         let mut config_picker_state = ListState::default();
         config_picker_state.select(Some(0));

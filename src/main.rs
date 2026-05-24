@@ -344,7 +344,7 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App) ->
                         }
                     }
                     KeyCode::Char('t') => {
-                        if app.route == app::Route::Proxies {
+                        if matches!(app.route, app::Route::Dashboard | app::Route::Proxies) {
                             app.trigger_selected_proxy_latency_test();
                         } else {
                             app.trigger_latency_test();

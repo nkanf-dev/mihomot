@@ -334,10 +334,15 @@ fn draw_traffic_card(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_latency_gauge(f: &mut Frame, app: &App, area: Rect) {
-    let (latency_label, latency_color, percent) = match &app.real_latency_status {
-        RealLatencyStatus::Pending => ("Idle".to_string(), Theme::MUTED, 0),
-        RealLatencyStatus::Testing => ("Testing...".to_string(), Theme::WARN, 35),
-        RealLatencyStatus::Success(ms) => {
+    let selected_proxy_name = app.get_selected_proxy_name();
+    let selected_proxy_latency = selected_proxy_name
+        .as_ref()
+        .and_then(|name| app.proxy_latency.get(name));
+    let (latency_label, latency_color, percent) = match selected_proxy_latency {
+        Some(ProxyLatencyStatus::Testing) => {
+            ("Testing selected node...".to_string(), Theme::WARN, 35)
+        }
+        Some(ProxyLatencyStatus::Success(ms)) => {
             let color = latency_color(Some(*ms));
             (
                 format!("{} ms", ms),
@@ -345,13 +350,23 @@ fn draw_latency_gauge(f: &mut Frame, app: &App, area: Rect) {
                 (1000.0 / (*ms as f64).max(10.0) * 100.0).min(100.0) as u16,
             )
         }
-        RealLatencyStatus::Failed(msg) => (format!("Err: {msg}"), Theme::BAD, 100),
+        Some(ProxyLatencyStatus::Failed(msg)) => (format!("Err: {msg}"), Theme::BAD, 100),
+        None => match &app.real_latency_status {
+            RealLatencyStatus::Pending => ("No node latency".to_string(), Theme::MUTED, 0),
+            RealLatencyStatus::Testing => ("No node latency".to_string(), Theme::MUTED, 0),
+            RealLatencyStatus::Success(_) => ("No node latency".to_string(), Theme::MUTED, 0),
+            RealLatencyStatus::Failed(_) => ("No node latency".to_string(), Theme::MUTED, 0),
+        },
     };
 
+    let title = selected_proxy_name
+        .as_deref()
+        .map(|name| format!(" Selected Node Latency: {name} "))
+        .unwrap_or_else(|| " Selected Node Latency ".to_string());
     let gauge = Gauge::default()
         .block(
             Block::default()
-                .title(" Global Latency ")
+                .title(title)
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Theme::MUTED)),
         )
@@ -411,7 +426,7 @@ fn draw_traffic_sparklines(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(up_sparkline, chart_chunks[1]);
 }
 
-fn draw_proxies_page(f: &mut Frame, app: &App, area: Rect) {
+fn draw_proxies_page(f: &mut Frame, app: &mut App, area: Rect) {
     let inner_area = draw_content_outline(f, app, area, " Proxies ");
 
     let direction = if area.width < 90 {
@@ -429,9 +444,9 @@ fn draw_proxies_page(f: &mut Frame, app: &App, area: Rect) {
     draw_proxy_cards(f, app, chunks[1]);
 }
 
-fn draw_group_cards(f: &mut Frame, app: &App, area: Rect) {
+fn draw_group_cards(f: &mut Frame, app: &mut App, area: Rect) {
     let selected_idx = app.group_state.selected();
-    let items: Vec<ListItem> = app
+    let items: Vec<ListItem<'static>> = app
         .group_names
         .iter()
         .enumerate()
@@ -440,14 +455,18 @@ fn draw_group_cards(f: &mut Frame, app: &App, area: Rect) {
             let group = app.proxies.get(name);
             let ptype = group
                 .and_then(|item| item.proxy_type.as_deref())
-                .unwrap_or("Group");
+                .unwrap_or("Group")
+                .to_string();
             let count = group.and_then(|item| item.all.as_ref()).map_or(0, Vec::len);
-            let now = group.and_then(|item| item.now.as_deref()).unwrap_or("-");
+            let now = group
+                .and_then(|item| item.now.as_deref())
+                .unwrap_or("-")
+                .to_string();
             let style = card_text_style(selected, app.proxy_pane == ProxyPane::Groups);
             ListItem::new(vec![
                 Line::from(vec![
                     Span::styled(if selected { "> " } else { "  " }, style),
-                    Span::styled(name.as_str(), style.add_modifier(Modifier::BOLD)),
+                    Span::styled(name.clone(), style.add_modifier(Modifier::BOLD)),
                 ]),
                 Line::from(vec![
                     Span::styled("  type ", Style::default().fg(Theme::MUTED)),
@@ -480,51 +499,57 @@ fn draw_group_cards(f: &mut Frame, app: &App, area: Rect) {
         List::new(items)
     };
 
-    f.render_widget(content.block(block), area);
+    f.render_stateful_widget(content.block(block), area, &mut app.group_state);
 }
 
-fn draw_proxy_cards(f: &mut Frame, app: &App, area: Rect) {
+fn draw_proxy_cards(f: &mut Frame, app: &mut App, area: Rect) {
     let selected_proxy = app.proxy_state.selected();
-    let group = app.selected_group();
-    let proxy_names = group.and_then(|item| item.all.as_ref());
-
-    let items: Vec<ListItem> = proxy_names
-        .map(|names| {
-            names
-                .iter()
-                .enumerate()
-                .map(|(idx, name)| {
-                    let selected = selected_proxy == Some(idx);
-                    let current = group.and_then(|item| item.now.as_ref()) == Some(name);
-                    let proxy = app.proxies.get(name);
-                    let ptype = proxy
-                        .and_then(|item| item.proxy_type.as_deref())
-                        .unwrap_or("Proxy");
-                    let latency = app.proxy_latency.get(name);
-                    let (latency_text, latency_style) = proxy_latency_display(latency);
-                    let style = card_text_style(selected, app.proxy_pane == ProxyPane::Proxies);
-                    ListItem::new(vec![
-                        Line::from(vec![
-                            Span::styled(if selected { "> " } else { "  " }, style),
-                            Span::styled(name.as_str(), style.add_modifier(Modifier::BOLD)),
-                            Span::raw(" "),
-                            Span::styled(
-                                if current { "[active]" } else { "" },
-                                Style::default().fg(Theme::GOOD),
-                            ),
-                        ]),
-                        Line::from(vec![
-                            Span::styled("  type ", Style::default().fg(Theme::MUTED)),
-                            Span::styled(ptype, Style::default().fg(Theme::TEXT)),
-                            Span::styled("  latency ", Style::default().fg(Theme::MUTED)),
-                            Span::styled(latency_text, latency_style),
-                        ]),
-                        Line::from(""),
-                    ])
-                })
-                .collect()
+    let selected_group_name = app.get_selected_group_name().cloned();
+    let (current_proxy, proxy_names) = selected_group_name
+        .as_ref()
+        .and_then(|group_name| app.proxies.get(group_name))
+        .map(|group| {
+            (
+                group.now.clone(),
+                group.all.as_ref().cloned().unwrap_or_default(),
+            )
         })
         .unwrap_or_default();
+
+    let items: Vec<ListItem<'static>> = proxy_names
+        .iter()
+        .enumerate()
+        .map(|(idx, name)| {
+            let selected = selected_proxy == Some(idx);
+            let current = current_proxy.as_ref() == Some(name);
+            let proxy = app.proxies.get(name);
+            let ptype = proxy
+                .and_then(|item| item.proxy_type.as_deref())
+                .unwrap_or("Proxy")
+                .to_string();
+            let latency = app.proxy_latency.get(name);
+            let (latency_text, latency_style) = proxy_latency_display(latency);
+            let style = card_text_style(selected, app.proxy_pane == ProxyPane::Proxies);
+            ListItem::new(vec![
+                Line::from(vec![
+                    Span::styled(if selected { "> " } else { "  " }, style),
+                    Span::styled(name.clone(), style.add_modifier(Modifier::BOLD)),
+                    Span::raw(" "),
+                    Span::styled(
+                        if current { "[active]" } else { "" },
+                        Style::default().fg(Theme::GOOD),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled("  type ", Style::default().fg(Theme::MUTED)),
+                    Span::styled(ptype, Style::default().fg(Theme::TEXT)),
+                    Span::styled("  latency ", Style::default().fg(Theme::MUTED)),
+                    Span::styled(latency_text, latency_style),
+                ]),
+                Line::from(""),
+            ])
+        })
+        .collect();
 
     let focused = app.focus == Focus::Content && app.proxy_pane == ProxyPane::Proxies;
     let title = app
@@ -546,7 +571,7 @@ fn draw_proxy_cards(f: &mut Frame, app: &App, area: Rect) {
         List::new(items)
     };
 
-    f.render_widget(content.block(block), area);
+    f.render_stateful_widget(content.block(block), area, &mut app.proxy_state);
 }
 
 fn card_text_style(selected: bool, focused_pane: bool) -> Style {
@@ -1204,6 +1229,63 @@ mod tests {
             assert!(screen.contains("Node A"));
             assert!(screen.contains("120 ms"));
         }
+    }
+
+    #[tokio::test]
+    async fn dashboard_shows_selected_node_latency() {
+        let mut app = test_app();
+        app.set_route(Route::Dashboard);
+        app.proxy_latency
+            .insert("Node A".to_string(), ProxyLatencyStatus::Testing);
+
+        let screen = render_screen(app, 120, 34);
+
+        assert!(screen.contains("Selected Node Latency"));
+        assert!(screen.contains("Node A"));
+        assert!(screen.contains("Testing selected node"));
+    }
+
+    #[tokio::test]
+    async fn proxy_list_scrolls_to_selected_node() {
+        let mut app = test_app();
+        let nodes = (0..30)
+            .map(|idx| format!("Node {idx:02}"))
+            .collect::<Vec<_>>();
+
+        app.group_names = vec!["Auto".to_string()];
+        app.group_state.select(Some(0));
+        app.proxy_state.select(Some(29));
+        app.set_proxy_pane(ProxyPane::Proxies);
+
+        let mut proxies = HashMap::new();
+        proxies.insert(
+            "Auto".to_string(),
+            ProxyItem {
+                name: Some("Auto".to_string()),
+                proxy_type: Some("Selector".to_string()),
+                now: Some("Node 29".to_string()),
+                all: Some(nodes.clone()),
+                extra: serde_json::Map::new(),
+            },
+        );
+        for node in &nodes {
+            proxies.insert(
+                node.clone(),
+                ProxyItem {
+                    name: Some(node.clone()),
+                    proxy_type: Some("Trojan".to_string()),
+                    now: None,
+                    all: None,
+                    extra: serde_json::Map::new(),
+                },
+            );
+        }
+        app.proxies = proxies;
+
+        let screen = render_screen(app, 120, 18);
+
+        assert!(screen.contains("Node 29"));
+        assert!(!screen.contains("Node 00"));
     }
 
     #[tokio::test]
