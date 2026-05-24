@@ -172,18 +172,18 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          fetch-depth: 0
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: ${{ env.BIN_NAME }}-${{ needs.prepare.outputs.tag }}-*
           path: dist
           merge-multiple: true
-
-      - name: Checkout tag
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.prepare.outputs.tag }}
-          fetch-depth: 0
 
       - name: Generate release notes
         shell: bash
