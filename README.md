@@ -35,6 +35,10 @@ After installation, view the token with:
 sudo journalctl -u mihomot -f
 ```
 
+You should see an agent-ready prompt like this:
+
+![mihomot agent prompt](img/mihomot-agent-prompt.webp)
+
 To install a specific release:
 
 ```bash
