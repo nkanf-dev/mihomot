@@ -30,6 +30,11 @@ impl Theme {
 }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    f.render_widget(
+        Block::default().style(Style::default().bg(Theme::BG)),
+        f.area(),
+    );
+
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -497,15 +502,10 @@ fn draw_group_cards(f: &mut Frame, app: &mut App, area: Rect) {
 fn draw_proxy_cards(f: &mut Frame, app: &mut App, area: Rect) {
     let selected_proxy = app.proxy_state.selected();
     let selected_group_name = app.get_selected_group_name();
-    let (current_proxy, proxy_names) = selected_group_name
+    let (current_proxy, proxy_names): (Option<&str>, &[String]) = selected_group_name
         .and_then(|group_name| app.proxies.get(group_name))
-        .map(|group| {
-            (
-                group.now.as_deref(),
-                group.all.as_deref().unwrap_or_default(),
-            )
-        })
-        .unwrap_or_default();
+        .map(|group| (group.now.as_deref(), group.all.as_deref().unwrap_or(&[])))
+        .unwrap_or((None, &[]));
     let proxy_pane = app.proxy_pane;
 
     let items: Vec<ListItem<'_>> = proxy_names
@@ -1248,6 +1248,7 @@ mod tests {
         app.group_names = vec!["Auto".to_string()];
         app.group_state.select(Some(0));
         app.proxy_state.select(Some(29));
+        app.set_route(Route::Proxies);
         app.set_proxy_pane(ProxyPane::Proxies);
 
         let mut proxies = HashMap::new();

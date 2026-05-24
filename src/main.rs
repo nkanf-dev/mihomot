@@ -273,10 +273,17 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App) ->
             app.on_traffic(traffic);
         }
 
-        if event::poll(std::time::Duration::from_millis(100))?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
+        if event::poll(std::time::Duration::from_millis(100))? {
+            let key = match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => key,
+                Event::Resize(_, _) => {
+                    terminal.autoresize()?;
+                    terminal.clear()?;
+                    continue;
+                }
+                _ => continue,
+            };
+
             if app.is_editing {
                 match key.code {
                     KeyCode::Esc => {
