@@ -871,7 +871,7 @@ async fn run_tunnel(local_url: String, config_override: Option<String>) -> Resul
     let err_file = log_file.try_clone()?;
 
     let child = Command::new(&cloudflared)
-        .args(["tunnel", "--url", &local_url])
+        .args(["tunnel", "--url", &local_url, "--no-autoupdate"])
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(err_file))
         .spawn()?;
@@ -1152,18 +1152,26 @@ fn cleanup_tunnel_state(pid_path: &std::path::Path, url_path: &std::path::Path) 
 }
 
 fn read_secret_for_tunnel(config_override: Option<String>) -> Result<String> {
+    // 1. Try environment variable first (works with sudo -E)
+    if let Ok(secret) = std::env::var("MIHOMO_SECRET") {
+        if !secret.trim().is_empty() {
+            return Ok(secret);
+        }
+    }
+
+    // 2. Try settings.json (check both current user and /root if running with sudo)
     let settings_secret = app::App::load_app_settings().api_secret;
     if !settings_secret.trim().is_empty() && settings_secret != "mihomo" {
         return Ok(settings_secret);
     }
 
+    // 3. Try to read from config file
     let config_path = config_override
         .map(PathBuf::from)
         .unwrap_or_else(config::default_config_path);
     let secret = config::read_config(&config_path)
         .ok()
         .and_then(|config| config.secret)
-        .or_else(|| std::env::var("MIHOMO_SECRET").ok())
         .unwrap_or_default();
 
     if secret.trim().is_empty() {
@@ -1251,7 +1259,10 @@ async fn tunnel_url_is_usable(url: &str, secret: &str) -> bool {
 async fn wait_for_tunnel_ready(url: &str, secret: &str, log_path: &std::path::Path) -> Result<()> {
     let mut last_err = "not probed".to_string();
 
-    for _ in 0..20 {
+    for i in 0..60 {
+        if i % 10 == 0 && i > 0 {
+            println!("  still waiting for tunnel readiness ({}s elapsed)...", i);
+        }
         match probe_tunnel_url(url, secret).await {
             Ok(()) => return Ok(()),
             Err(err) => last_err = err.to_string(),
@@ -1268,7 +1279,8 @@ async fn wait_for_tunnel_ready(url: &str, secret: &str, log_path: &std::path::Pa
 async fn probe_tunnel_url(url: &str, secret: &str) -> Result<()> {
     let status_url = format!("{}/mhmt/status", url.trim_end_matches('/'));
     let resp = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(8))
+        .no_proxy()
         .build()?
         .get(status_url)
         .bearer_auth(secret)
@@ -1291,7 +1303,7 @@ fn cloudflared_target() -> Result<&'static str> {
 }
 
 async fn wait_for_tunnel_url(log_path: &std::path::Path) -> Result<String> {
-    for _ in 0..30 {
+    for _ in 0..60 {
         if let Ok(file) = fs::File::open(log_path) {
             let reader = BufReader::new(file);
             for line in reader.lines().map_while(Result::ok) {
