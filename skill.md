@@ -111,6 +111,8 @@ mihomo API 的 endpoint 和 secret 与 mihomot 相同。高级场景下也可以
 
 `/mhmt/config/switch` 只允许切换到当前 active config 同目录下的 mihomo 主配置文件。目标配置的 `secret` 和 `external-controller` 必须与当前 mihomot 启动时使用的配置兼容；否则需要先编辑目标配置，或让用户用目标配置重启 mihomot。
 
+如果是在本机 TUI 里直连 mihomo 的 `external-controller`，而不是通过 mihomot 扩展 API 切换配置，也同样要求所有可切换主配置共享完全相同的 `external-controller` 和 `secret`。不满足这个前提时，不要尝试切换，应该先调整配置或改为通过 mihomot 服务端管理。
+
 ### 4.4 操作前检查
 
 每次操作前先 `GET /mhmt/status` 确认服务器在线。
@@ -152,7 +154,7 @@ proxy-groups:
 5. GET /proxies 检查代理组是否符合目标配置
 ```
 
-不要把订阅客户端的元数据文件当成 mihomo 主配置。可切换文件应是完整 YAML，通常包含 `proxy-providers`、`proxy-groups`、`rules`、`mixed-port`、`external-controller` 等字段。
+不要把订阅客户端的元数据文件当成 mihomo 主配置。可切换文件应是完整 YAML，通常包含 `proxy-providers`、`proxy-groups`、`rules`、`mixed-port`、`external-controller` 等字段；并且在可切换方案里应共享同一个 `external-controller` 和 `secret`。
 
 ### 链式代理
 

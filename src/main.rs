@@ -1170,10 +1170,10 @@ fn cleanup_tunnel_state(pid_path: &std::path::Path, url_path: &std::path::Path) 
 
 fn read_secret_for_tunnel(config_override: Option<String>) -> Result<String> {
     // 1. Try environment variable first (works with sudo -E)
-    if let Ok(secret) = std::env::var("MIHOMO_SECRET") {
-        if !secret.trim().is_empty() {
-            return Ok(secret);
-        }
+    if let Ok(secret) = std::env::var("MIHOMO_SECRET")
+        && !secret.trim().is_empty()
+    {
+        return Ok(secret);
     }
 
     // 2. Try settings.json (check both current user and /root if running with sudo)

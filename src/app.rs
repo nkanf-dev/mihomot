@@ -580,12 +580,39 @@ impl App {
             return Ok(());
         }
 
+        self.validate_native_reload_target(path)?;
+
         crate::mihomo::reload(
             &self.app_settings.base_url,
             &self.app_settings.api_secret,
             path,
         )
         .await
+    }
+
+    fn validate_native_reload_target(&self, path: &Path) -> Result<()> {
+        let target_config = crate::config::read_config(path)?;
+        let target_secret = target_config.secret.as_deref().unwrap_or_default();
+        if target_secret != self.app_settings.api_secret {
+            bail!(
+                "Native mihomo config switching requires the target config to keep the same secret as the current session"
+            );
+        }
+
+        let Some(external_controller) = target_config.external_controller.as_deref() else {
+            bail!(
+                "Native mihomo config switching requires the target config to define external-controller"
+            );
+        };
+
+        if !controller_matches_base_url(external_controller, &self.app_settings.base_url) {
+            bail!(
+                "Native mihomo config switching requires the target config to keep the same external-controller as the current session ({})",
+                self.app_settings.base_url
+            );
+        }
+
+        Ok(())
     }
 
     async fn try_mihomot_config_switch(&self, path: &Path) -> Result<bool> {
@@ -983,6 +1010,38 @@ fn mihomo_api_timeout() -> Duration {
     Duration::from_secs(5)
 }
 
+fn controller_matches_base_url(external_controller: &str, base_url: &str) -> bool {
+    let (target_host, target_port) = crate::config::parse_external_controller(external_controller);
+    let (base_host, base_port) = parse_endpoint_host_port(base_url);
+    target_host == base_host && Some(target_port) == base_port
+}
+
+fn parse_endpoint_host_port(endpoint: &str) -> (String, Option<u16>) {
+    let without_scheme = endpoint
+        .strip_prefix("http://")
+        .or_else(|| endpoint.strip_prefix("https://"))
+        .unwrap_or(endpoint);
+    let host_port = without_scheme.split('/').next().unwrap_or(without_scheme);
+
+    if host_port.starts_with('[')
+        && let Some(closing_bracket) = host_port.find(']')
+    {
+        let host = &host_port[1..closing_bracket];
+        let remainder = &host_port[closing_bracket + 1..];
+        if let Some(port_str) = remainder.strip_prefix(':') {
+            return (host.to_string(), port_str.parse::<u16>().ok());
+        } else {
+            return (host.to_string(), None);
+        }
+    }
+
+    if let Some((host, port)) = host_port.rsplit_once(':') {
+        (host.to_string(), port.parse::<u16>().ok())
+    } else {
+        (host_port.to_string(), None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1250,6 +1309,8 @@ mod tests {
         let (server_url, requests) = spawn_config_reload_server()
             .await
             .expect("server should start");
+        let (host, port) = parse_endpoint_host_port(&server_url);
+        let port = port.expect("server url should include port");
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock should be after epoch")
@@ -1260,7 +1321,7 @@ mod tests {
         ));
         fs::write(
             &path,
-            "mixed-port: 7890\nexternal-controller: 127.0.0.1:9090\n",
+            format!("mixed-port: 7890\nexternal-controller: {host}:{port}\n"),
         )
         .expect("test config should be writable");
 
@@ -1276,6 +1337,93 @@ mod tests {
                 .any(|line| line.starts_with("POST /mhmt/config/switch"))
         );
         assert!(requests.iter().any(|line| line.starts_with("PUT /configs")));
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn reload_config_file_rejects_native_fallback_when_secret_changes() {
+        let (server_url, requests) = spawn_config_reload_server()
+            .await
+            .expect("server should start");
+        let (host, port) = parse_endpoint_host_port(&server_url);
+        let port = port.expect("server url should include port");
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "mihomot-native-reload-secret-mismatch-{}-{nanos}.yaml",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            format!("mixed-port: 7890\nexternal-controller: {host}:{port}\nsecret: changed\n"),
+        )
+        .expect("test config should be writable");
+
+        let app = App::new(Some(server_url), Some("current".to_string()));
+        let err = app
+            .reload_config_file(&path)
+            .await
+            .expect_err("secret mismatch should reject native reload fallback");
+        assert!(
+            err.to_string()
+                .contains("keep the same secret as the current session")
+        );
+
+        let requests = requests.lock().unwrap();
+        assert!(
+            requests
+                .iter()
+                .any(|line| line.starts_with("POST /mhmt/config/switch"))
+        );
+        assert!(!requests.iter().any(|line| line.starts_with("PUT /configs")));
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn reload_config_file_rejects_native_fallback_when_controller_changes() {
+        let (server_url, requests) = spawn_config_reload_server()
+            .await
+            .expect("server should start");
+        let (host, port) = parse_endpoint_host_port(&server_url);
+        let port = port.expect("server url should include port");
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "mihomot-native-reload-controller-mismatch-{}-{nanos}.yaml",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            format!(
+                "mixed-port: 7890\nexternal-controller: {host}:{}\nsecret: same\n",
+                port + 1
+            ),
+        )
+        .expect("test config should be writable");
+
+        let app = App::new(Some(server_url), Some("same".to_string()));
+        let err = app
+            .reload_config_file(&path)
+            .await
+            .expect_err("controller mismatch should reject native reload fallback");
+        assert!(
+            err.to_string()
+                .contains("keep the same external-controller as the current session")
+        );
+
+        let requests = requests.lock().unwrap();
+        assert!(
+            requests
+                .iter()
+                .any(|line| line.starts_with("POST /mhmt/config/switch"))
+        );
+        assert!(!requests.iter().any(|line| line.starts_with("PUT /configs")));
 
         let _ = fs::remove_file(&path);
     }
