@@ -44,10 +44,10 @@ need_cmd() {
 detect_target() {
   case "$(uname -m)" in
     x86_64 | amd64)
-      printf '%s\n' "x86_64-unknown-linux-gnu"
+      printf '%s\n' "x86_64-unknown-linux-musl"
       ;;
     aarch64 | arm64)
-      printf '%s\n' "aarch64-unknown-linux-gnu"
+      printf '%s\n' "aarch64-unknown-linux-musl"
       ;;
     *)
       die "unsupported architecture: $(uname -m)"
@@ -86,13 +86,12 @@ proxied_url() {
 
 rank_github_prefixes() {
   local probe_url="$1"
+  local output_file="$2"
   local prefix
   local url
-  local result_file
   local total
 
-  result_file="$TMP_DIR/github-prefix-speed.txt"
-  : > "$result_file"
+  : > "$output_file"
 
   while IFS= read -r prefix; do
     url="$(proxied_url "$prefix" "$probe_url")"
@@ -104,24 +103,25 @@ rank_github_prefixes() {
     )"
 
     if [ -n "$total" ]; then
-      printf '%s\t%s\n' "$total" "$prefix" >> "$result_file"
+      printf '%s\t%s\n' "$total" "$prefix" >> "$output_file"
       info "GitHub source reachable in ${total}s: ${url}"
     else
       warn "GitHub source probe failed: $url"
     fi
   done < <(github_prefixes)
 
-  if [ -s "$result_file" ]; then
-    sort -n "$result_file" | awk -F '\t' '{print $2}'
+  if [ -s "$output_file" ]; then
+    sort -n "$output_file" | awk -F '\t' '{print $2}' > "${output_file}.ranked"
+    mv "${output_file}.ranked" "$output_file"
   else
-    github_prefixes
+    github_prefixes > "$output_file"
   fi
 }
 
 download_with_ranked_prefixes() {
   local source_url="$1"
   local output="$2"
-  local probe_url="$3"
+  local ranked_file="$3"
   local prefix
   local url
 
@@ -134,7 +134,7 @@ download_with_ranked_prefixes() {
     fi
 
     warn "download failed or too slow, trying next source"
-  done < <(rank_github_prefixes "$probe_url")
+  done < "$ranked_file"
 
   die "failed to download $source_url"
 }
@@ -240,6 +240,50 @@ EOF
   fi
 }
 
+print_agent_instructions() {
+  if ! has_cmd journalctl || ! has_cmd systemctl || [ ! -d /run/systemd/system ]; then
+    return
+  fi
+
+  info "waiting for mihomot agent instructions"
+  wait_attempt=1
+  while [ "$wait_attempt" -le 60 ]; do
+    if as_root journalctl -u "${SERVICE_NAME}.service" --since "2 minutes ago" -n 200 --no-pager \
+      | awk '
+        /━━━━━━━━/ && !capture {last_sep=$0}
+        /把这段话发给你的 AI agent:/ {
+          block = ""
+          if (last_sep) block = last_sep "\n"
+          capture=1
+          token=0
+        }
+        capture {block = block $0 "\n"}
+        capture && /token:/ {token=1}
+        capture && token && /━━━━━━━━/ {
+          last_block=block
+          seen=1
+          capture=0
+          token=0
+          block=""
+        }
+        END {
+          if (seen) {
+            printf "%s", last_block
+            exit 0
+          }
+          exit 1
+        }
+      '; then
+      return
+    fi
+    sleep 1
+    wait_attempt=$((wait_attempt + 1))
+  done
+
+  warn "could not find agent instructions in journal yet"
+  printf 'View them with: sudo journalctl -u %s -n 120 --no-pager\n' "$SERVICE_NAME"
+}
+
 main() {
   [ "$(uname -s)" = "Linux" ] || die "upgrade.sh only supports Linux"
 
@@ -254,6 +298,7 @@ main() {
   local archive
   local checksum
   local binary_path
+  local ranked_prefixes
 
   target="$(detect_target)"
   if [ -n "${MIHOMOT_VERSION:-}" ]; then
@@ -268,15 +313,11 @@ main() {
 
   archive="$TMP_DIR/${package}.tar.gz"
   checksum="$TMP_DIR/${package}.tar.gz.sha256"
+  ranked_prefixes="$TMP_DIR/github-prefixes-ranked.txt"
 
-  download_with_ranked_prefixes \
-    "${release_base}/${package}.tar.gz" \
-    "$archive" \
-    "${release_base}/${package}.tar.gz.sha256"
-  download_with_ranked_prefixes \
-    "${release_base}/${package}.tar.gz.sha256" \
-    "$checksum" \
-    "${release_base}/${package}.tar.gz.sha256"
+  rank_github_prefixes "${release_base}/${package}.tar.gz.sha256" "$ranked_prefixes"
+  download_with_ranked_prefixes "${release_base}/${package}.tar.gz" "$archive" "$ranked_prefixes"
+  download_with_ranked_prefixes "${release_base}/${package}.tar.gz.sha256" "$checksum" "$ranked_prefixes"
 
   info "verifying checksum"
   (cd "$TMP_DIR" && sha256sum -c "${package}.tar.gz.sha256")
@@ -298,7 +339,11 @@ main() {
   install_tui_settings
 
   info "mihomot upgraded successfully"
+  print_agent_instructions
   printf '\nConfig preserved: %s\n' "$CONFIG_PATH"
+  printf 'Local TUI: mihomot tui\n'
+  printf 'Temporary tunnel: sudo mihomot tunnel\n'
+  printf '  Use this when TCP 9091 is not open; the trycloudflare endpoint is temporary.\n'
   printf 'Check status: systemctl status %s\n' "$SERVICE_NAME"
 }
 

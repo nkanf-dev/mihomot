@@ -387,7 +387,7 @@ impl App {
         }
     }
 
-    fn load_app_settings() -> AppSettings {
+    pub fn load_app_settings() -> AppSettings {
         if let Some(path) = Self::get_config_path()
             && path.exists()
             && let Ok(content) = fs::read_to_string(path)

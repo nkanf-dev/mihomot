@@ -45,6 +45,15 @@ pub fn default_config_path() -> PathBuf {
         .join("config.yaml")
 }
 
+#[allow(dead_code)]
+pub fn user_config_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".config")
+        .join("mihomo")
+        .join("config.yaml")
+}
+
 /// Read the mihomo config.yaml file
 pub fn read_config(path: &Path) -> Result<MihomoConfig> {
     let content =
@@ -295,5 +304,23 @@ secret: test123
         }));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn user_config_path_uses_home_directory() {
+        let original_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", "/tmp/mihomot-home");
+        }
+        assert_eq!(
+            user_config_path(),
+            PathBuf::from("/tmp/mihomot-home/.config/mihomo/config.yaml")
+        );
+        unsafe {
+            match original_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
     }
 }

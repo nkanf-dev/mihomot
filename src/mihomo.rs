@@ -1,9 +1,14 @@
 use anyhow::{Context, Result};
+use flate2::read::GzDecoder;
+use futures_util::StreamExt;
+use serde::Deserialize;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
-const GITHUB_RELEASE_URL: &str = "https://github.com/MetaCubeX/mihomo/releases/latest/download";
-const GHPROXY_PREFIX: &str = "https://gh-proxy.com/";
+const GITHUB_API_RELEASE_URL: &str =
+    "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest";
 const MIHOMO_IMAGE: &str = "metacubex/mihomo:latest";
 const SKILL_RAW_URL: &str = "https://raw.githubusercontent.com/nkanf-dev/mihomot/main/skill.md";
 
@@ -16,6 +21,17 @@ pub enum RuntimeMode {
     Binary {
         path: PathBuf,
     },
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubRelease {
+    assets: Vec<GithubAsset>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct GithubAsset {
+    name: String,
+    browser_download_url: String,
 }
 
 /// Return the best skill.md URL for the current network region.
@@ -138,14 +154,13 @@ pub fn start(runtime: &RuntimeMode, config_path: &Path) -> Result<()> {
             }
         }
         RuntimeMode::Binary { path } => {
-            // Use status() to wait for process to be ready, then detach
-            // mihomo daemonizes itself with -d flag, so status() returns once it forks
             Command::new(path)
                 .arg("-d")
                 .arg(config_path.parent().unwrap_or(Path::new(".")))
                 .arg("-f")
                 .arg(config_path)
-                .status()
+                .stdin(Stdio::null())
+                .spawn()
                 .context("Failed to start mihomo binary")?;
         }
     }
@@ -332,32 +347,37 @@ fn docker_image_candidates() -> Vec<String> {
 /// Download mihomo binary with CN-aware mirror logic
 async fn download_binary(dest: &Path) -> Result<()> {
     let (os, arch) = detect_platform()?;
-    let filename = format!("mihomo-{}-{}", os, arch);
-
-    // Build download URLs in priority order
-    let gh_url = format!("{}/{}", GITHUB_RELEASE_URL, filename);
-    let proxy_url = format!("{}{}", GHPROXY_PREFIX, gh_url);
-
-    let urls = if is_likely_cn() {
-        vec![proxy_url, gh_url]
-    } else {
-        vec![gh_url, proxy_url]
-    };
+    let asset = find_latest_mihomo_asset(&os, &arch).await?;
+    println!("Selected mihomo asset: {}", asset.name);
 
     fs_create_dir_all(dest)?;
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(900))
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()?;
+    let urls = ranked_github_urls(&client, &asset.browser_download_url).await;
 
     let mut last_err = None;
     for url in &urls {
         println!("Trying: {}", url);
         match client.get(url).send().await {
             Ok(resp) if resp.status().is_success() => {
-                let bytes = resp.bytes().await?;
-                std::fs::write(dest, &bytes)?;
+                let bytes = match download_response_with_progress(resp, "mihomo").await {
+                    Ok(bytes) => bytes,
+                    Err(err) => {
+                        last_err = Some(format!("download body error from {url}: {err}"));
+                        continue;
+                    }
+                };
+                let binary = match decode_mihomo_asset(&asset.name, &bytes) {
+                    Ok(binary) => binary,
+                    Err(err) => {
+                        last_err = Some(format!("decode error from {url}: {err:#}"));
+                        continue;
+                    }
+                };
+                std::fs::write(dest, &binary)?;
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
@@ -383,6 +403,279 @@ async fn download_binary(dest: &Path) -> Result<()> {
         last_err.unwrap_or_else(|| "unknown".to_string()),
         dest.display()
     )
+}
+
+async fn find_latest_mihomo_asset(os: &str, arch: &str) -> Result<GithubAsset> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .user_agent("mihomot")
+        .build()?;
+
+    let mut last_err = None;
+    for url in github_api_urls(GITHUB_API_RELEASE_URL) {
+        println!("Trying mihomo release metadata: {}", url);
+        match client.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let release = match resp.json::<GithubRelease>().await {
+                    Ok(release) => release,
+                    Err(err) => {
+                        last_err = Some(format!("metadata decode error from {url}: {err}"));
+                        continue;
+                    }
+                };
+                match select_mihomo_asset(release.assets, os, arch) {
+                    Ok(asset) => return Ok(asset),
+                    Err(err) => {
+                        last_err = Some(err.to_string());
+                    }
+                }
+            }
+            Ok(resp) => {
+                last_err = Some(format!("HTTP {}", resp.status()));
+            }
+            Err(err) => {
+                last_err = Some(err.to_string());
+            }
+        }
+    }
+
+    anyhow::bail!(
+        "failed to read latest mihomo release metadata: {}",
+        last_err.unwrap_or_else(|| "unknown".to_string())
+    )
+}
+
+fn github_api_urls(source_url: &str) -> Vec<String> {
+    let mut urls = vec![source_url.to_string()];
+
+    if let Ok(proxy) = std::env::var("MIHOMOT_GITHUB_API_PROXY") {
+        let proxy = proxy.trim();
+        if proxy == "direct" {
+            return urls;
+        }
+        if !proxy.is_empty() {
+            urls.insert(0, proxied_url(proxy, source_url));
+            return urls;
+        }
+    }
+
+    if let Ok(proxy) = std::env::var("MIHOMOT_GITHUB_PROXY") {
+        let proxy = proxy.trim();
+        if proxy == "direct" {
+            return urls;
+        }
+        if !proxy.is_empty() {
+            urls.push(proxied_url(proxy, source_url));
+        }
+    }
+
+    urls
+}
+
+fn select_mihomo_asset(assets: Vec<GithubAsset>, os: &str, arch: &str) -> Result<GithubAsset> {
+    let prefix = format!("mihomo-{os}-{arch}");
+
+    let selected = if os == "linux" && arch == "amd64" {
+        assets
+            .iter()
+            .find(|asset| {
+                asset.name.starts_with("mihomo-linux-amd64-compatible-")
+                    && asset.name.ends_with(".gz")
+            })
+            .or_else(|| {
+                assets.iter().find(|asset| {
+                    asset.name.starts_with("mihomo-linux-amd64-v1-") && asset.name.ends_with(".gz")
+                })
+            })
+            .or_else(|| {
+                assets.iter().find(|asset| {
+                    asset.name.starts_with("mihomo-linux-amd64-")
+                        && asset.name.ends_with(".gz")
+                        && !asset.name.contains("-go")
+                        && !asset.name.contains("-v2-")
+                        && !asset.name.contains("-v3-")
+                })
+            })
+    } else {
+        assets
+            .iter()
+            .find(|asset| asset.name.starts_with(&prefix) && asset.name.ends_with(".gz"))
+    };
+
+    selected.cloned().with_context(|| {
+        let available = assets
+            .iter()
+            .map(|asset| asset.name.as_str())
+            .filter(|name| name.starts_with(&prefix))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "no matching mihomo asset for {os}/{arch}. Available matching assets: {}",
+            if available.is_empty() {
+                "(none)".to_string()
+            } else {
+                available
+            }
+        )
+    })
+}
+
+fn decode_mihomo_asset(name: &str, bytes: &[u8]) -> Result<Vec<u8>> {
+    if !name.ends_with(".gz") {
+        return Ok(bytes.to_vec());
+    }
+
+    let mut decoder = GzDecoder::new(bytes);
+    let mut decoded = Vec::new();
+    decoder
+        .read_to_end(&mut decoded)
+        .with_context(|| format!("failed to decompress {name}"))?;
+    Ok(decoded)
+}
+
+pub async fn ranked_github_urls(client: &reqwest::Client, source_url: &str) -> Vec<String> {
+    let candidates = github_prefixes()
+        .into_iter()
+        .map(|prefix| proxied_url(&prefix, source_url))
+        .collect::<Vec<_>>();
+
+    let mut ranked = Vec::new();
+    for url in &candidates {
+        let started = Instant::now();
+        let reachable = match client
+            .get(url)
+            .header(reqwest::header::RANGE, "bytes=0-1023")
+            .timeout(Duration::from_secs(12))
+            .send()
+            .await
+        {
+            Ok(resp) => match resp.error_for_status() {
+                Ok(resp) => resp
+                    .bytes()
+                    .await
+                    .map(|bytes| !bytes.is_empty())
+                    .unwrap_or(false),
+                Err(_) => false,
+            },
+            Err(_) => false,
+        };
+
+        if reachable {
+            let elapsed = started.elapsed();
+            println!(
+                "GitHub source reachable in {:.3}s: {}",
+                elapsed.as_secs_f64(),
+                url
+            );
+            ranked.push((elapsed, url.clone()));
+        } else {
+            eprintln!("GitHub source probe failed: {}", url);
+        }
+    }
+
+    if ranked.is_empty() {
+        return candidates;
+    }
+
+    ranked.sort_by_key(|(elapsed, _)| *elapsed);
+    ranked.into_iter().map(|(_, url)| url).collect()
+}
+
+fn github_prefixes() -> Vec<String> {
+    if let Ok(proxy) = std::env::var("MIHOMOT_GITHUB_PROXY") {
+        let proxy = proxy.trim();
+        if proxy == "direct" {
+            return vec![String::new()];
+        }
+        if !proxy.is_empty() {
+            return vec![proxy.to_string(), String::new()];
+        }
+    }
+
+    let mut prefixes = vec![
+        "https://gh-proxy.com/".to_string(),
+        "https://gh.jasonzeng.dev/".to_string(),
+        "https://ghfast.top/".to_string(),
+        "https://gh.llkk.cc/".to_string(),
+        String::new(),
+    ];
+
+    if !is_likely_cn() {
+        prefixes.rotate_right(1);
+    }
+
+    prefixes
+}
+
+fn proxied_url(prefix: &str, source_url: &str) -> String {
+    if prefix.is_empty() {
+        source_url.to_string()
+    } else {
+        format!("{}{}", prefix, source_url)
+    }
+}
+
+pub async fn download_response_with_progress(
+    resp: reqwest::Response,
+    label: &str,
+) -> Result<Vec<u8>> {
+    let total = resp.content_length();
+    let mut stream = resp.bytes_stream();
+    let mut bytes = Vec::new();
+    let mut downloaded = 0u64;
+    let started = Instant::now();
+    let mut last_print = Instant::now()
+        .checked_sub(Duration::from_secs(1))
+        .unwrap_or_else(Instant::now);
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        downloaded += chunk.len() as u64;
+        bytes.extend_from_slice(&chunk);
+
+        if last_print.elapsed() >= Duration::from_millis(500) {
+            print_download_progress(label, downloaded, total, started);
+            last_print = Instant::now();
+        }
+    }
+
+    if downloaded == 0 {
+        println!();
+        return Ok(bytes);
+    }
+
+    print_download_progress(label, downloaded, total, started);
+    println!();
+
+    Ok(bytes)
+}
+
+fn print_download_progress(label: &str, downloaded: u64, total: Option<u64>, started: Instant) {
+    let elapsed = started.elapsed().as_secs_f64().max(0.001);
+    let downloaded_mb = downloaded as f64 / 1024.0 / 1024.0;
+    let speed_mb = downloaded_mb / elapsed;
+
+    if let Some(total) = total {
+        let total_mb = total as f64 / 1024.0 / 1024.0;
+        let percent = if total == 0 {
+            100.0
+        } else {
+            downloaded as f64 * 100.0 / total as f64
+        };
+        eprint!(
+            "\rDownloading {label}: {:>5.1}% ({:.1}/{:.1} MiB, {:.1} MiB/s)",
+            percent.min(100.0),
+            downloaded_mb,
+            total_mb,
+            speed_mb
+        );
+    } else {
+        eprint!(
+            "\rDownloading {label}: {:.1} MiB ({:.1} MiB/s)",
+            downloaded_mb, speed_mb
+        );
+    }
 }
 
 fn detect_platform() -> Result<(String, String)> {
@@ -428,4 +721,47 @@ fn fs_create_dir_all(path: &Path) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GithubAsset, select_mihomo_asset};
+
+    fn asset(name: &str) -> GithubAsset {
+        GithubAsset {
+            name: name.to_string(),
+            browser_download_url: format!("https://example.invalid/{name}"),
+        }
+    }
+
+    #[test]
+    fn select_mihomo_asset_prefers_amd64_compatible_build() {
+        let selected = select_mihomo_asset(
+            vec![
+                asset("mihomo-linux-amd64-v1-v1.19.25.gz"),
+                asset("mihomo-linux-amd64-compatible-v1.19.25.gz"),
+                asset("mihomo-linux-amd64-v3-v1.19.25.gz"),
+            ],
+            "linux",
+            "amd64",
+        )
+        .unwrap();
+
+        assert_eq!(selected.name, "mihomo-linux-amd64-compatible-v1.19.25.gz");
+    }
+
+    #[test]
+    fn select_mihomo_asset_handles_arm64_gzip() {
+        let selected = select_mihomo_asset(
+            vec![
+                asset("mihomo-linux-arm64-v1.19.25.deb"),
+                asset("mihomo-linux-arm64-v1.19.25.gz"),
+            ],
+            "linux",
+            "arm64",
+        )
+        .unwrap();
+
+        assert_eq!(selected.name, "mihomo-linux-arm64-v1.19.25.gz");
+    }
 }

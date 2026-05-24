@@ -1,9 +1,10 @@
 use anyhow::{Context, Result, bail};
 use app::ConfigEntry;
 use clap::{Parser, Subcommand};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 mod app;
 mod config;
@@ -48,6 +49,15 @@ enum Commands {
         #[arg(short, long)]
         port: Option<u16>,
     },
+    /// Start a temporary Cloudflare Tunnel for the mihomot API
+    Tunnel {
+        /// Local mihomot API URL to expose
+        #[arg(short = 'U', long, default_value = "http://127.0.0.1:9091")]
+        url: String,
+        /// Config file path for reading the mihomo secret
+        #[arg(short, long)]
+        config: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -86,6 +96,7 @@ async fn main() -> Result<()> {
             };
             run_tui(url, secret, config).await
         }
+        Commands::Tunnel { url, config } => run_tunnel(url, config).await,
     }
 }
 
@@ -104,8 +115,19 @@ async fn run_serve(config_override: Option<String>, listen: String) -> Result<()
         .with_context(|| format!("Failed to resolve {}", config_path.display()))?;
 
     // Read mihomo config to get external-controller and secret
-    let mihomo_config =
-        config::read_config(&config_path).context("Failed to parse mihomo config.yaml")?;
+    let mihomo_config = match config::read_config(&config_path) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("Failed to read mihomo config at: {}", config_path.display());
+            eprintln!("Error: {err:#}");
+            if config_path == std::path::Path::new("/etc/mihomo/config.yaml") {
+                eprintln!("This install config is usually root-readable only.");
+                eprintln!("Start the server with: sudo mihomot");
+                eprintln!("For local management, run: mihomot tui");
+            }
+            std::process::exit(1);
+        }
+    };
 
     let (host, port) = config::parse_external_controller(
         mihomo_config
@@ -116,12 +138,6 @@ async fn run_serve(config_override: Option<String>, listen: String) -> Result<()
     let secret = mihomo_config.secret.unwrap_or_default();
 
     let (listen_host, listen_port) = parse_listen_addr(&listen);
-    let public_ip = detect_public_ip().await;
-    let server_host = public_ip
-        .clone()
-        .or_else(find_server_ip)
-        .unwrap_or_else(|| "127.0.0.1".to_string());
-    let agent_endpoint = format!("http://{}:{}", server_host, listen_port);
 
     // Determine the reachable mihomo endpoint for the local mihomot process.
     let mihomo_endpoint = {
@@ -138,52 +154,14 @@ async fn run_serve(config_override: Option<String>, listen: String) -> Result<()
     let token_str = token::generate_token(&secret)?;
     token::save_token(&token_str).ok(); // best-effort
 
-    // Print startup message
-    println!();
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("把这段话发给你的 AI agent:");
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!();
-    println!(
-        "我已安装 mihomot，请帮我管理我这个服务器({})的代理。",
-        server_host
-    );
-    println!("mihomot endpoint: {}", agent_endpoint);
-    println!(
-        "如果没有安装skill先安装这个skill: {}",
-        mihomo::skill_install_url()
-    );
-    println!("token: {}", token_str);
-    println!();
-    println!("提示:");
-    println!("  1. 请确认服务器防火墙/安全组已开放 TCP {}。", listen_port);
-    if public_ip.is_none() {
-        println!(
-            "  2. 未能自动获取公网 IP；如果上面的 endpoint 不是 agent 可访问地址，请把它改成公网 IP/域名后再发送。"
-        );
-    } else {
-        println!(
-            "  2. 如果上面的 endpoint 不是 agent 可访问地址，请改成正确的公网 IP/域名后再发送。"
-        );
-    }
-    if listen_host == "127.0.0.1" || listen_host == "::1" || listen_host == "localhost" {
-        println!(
-            "  3. 当前 mihomot 只监听 {}，远程 agent 可能无法访问；需要远程管理时请监听 0.0.0.0:{}。",
-            listen_host, listen_port
-        );
-    }
-    println!();
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!();
-
     // Ensure mihomo is available (detect or auto-install)
     let runtime = mihomo::ensure_mihomo(&config_path).await?;
     println!("mihomo runtime: {:?}", runtime);
 
-    if !mihomo::check_alive(&mihomo_endpoint, &secret)
+    let mut mihomo_ready = mihomo::check_alive(&mihomo_endpoint, &secret)
         .await
-        .unwrap_or(false)
-    {
+        .unwrap_or(false);
+    if !mihomo_ready {
         println!("mihomo is not responding, attempting to start...");
         if let Err(e) = mihomo::start(&runtime, &config_path) {
             eprintln!("Failed to start mihomo: {}", e);
@@ -196,10 +174,19 @@ async fn run_serve(config_override: Option<String>, listen: String) -> Result<()
                     .unwrap_or(false)
                 {
                     println!("mihomo started successfully.");
+                    mihomo_ready = true;
                     break;
                 }
             }
         }
+    }
+
+    if mihomo_ready {
+        print_startup_agent_block(&token_str, listen_host, listen_port).await;
+    } else {
+        eprintln!(
+            "mihomo is still not responding; agent instructions will be printed after it is healthy."
+        );
     }
 
     // Start HTTP API server
@@ -803,7 +790,106 @@ async fn commit_edit(app: &mut app::App) -> Result<()> {
 
 /// Find a non-loopback server IP
 fn find_server_ip() -> Option<String> {
-    local_ip_address::local_ip().ok().map(|ip| ip.to_string())
+    interface_ipv4_addrs()
+        .into_iter()
+        .filter(|(iface, _)| !is_mihomo_tun_iface(iface))
+        .map(|(_, ip)| ip)
+        .find(|ip| is_usable_local_ipv4(ip))
+        .or_else(|| {
+            local_ip_address::local_ip()
+                .ok()
+                .map(|ip| ip.to_string())
+                .filter(|ip| is_usable_local_ipv4(ip))
+        })
+}
+
+async fn run_tunnel(local_url: String, config_override: Option<String>) -> Result<()> {
+    let state_dir = mihomot_state_dir()?;
+    fs::create_dir_all(&state_dir)?;
+
+    let pid_path = state_dir.join("cloudflared.pid");
+    let url_path = state_dir.join("cloudflared.url");
+    let log_path = state_dir.join("cloudflared.log");
+    let secret = read_secret_for_tunnel(config_override)?;
+
+    let cached_pid = fs::read_to_string(&pid_path)
+        .ok()
+        .and_then(|pid_text| pid_text.trim().parse::<u32>().ok());
+    let cached_pid_alive = cached_pid.map(process_is_running).unwrap_or(false);
+
+    if let Ok(url) = fs::read_to_string(&url_path) {
+        let url = url.trim().to_string();
+        if !url.is_empty() && tunnel_url_is_usable(&url, &secret).await {
+            if let Some(pid) = cached_pid {
+                println!("Reusing existing Cloudflare Tunnel (pid {}).", pid);
+            } else {
+                println!("Reusing existing Cloudflare Tunnel.");
+            }
+            print_agent_block(
+                &url,
+                &secret,
+                Some(
+                    "这是临时 Cloudflare Tunnel 入口；已确认当前 endpoint 可以访问 mihomot。进程停止或重启后该 endpoint 会失效，需要重新运行 sudo mihomot tunnel 并把新的 endpoint 发给 agent。",
+                ),
+            );
+            if let Some(pid) = cached_pid {
+                println!("cloudflared pid: {}", pid);
+                println!("stop tunnel: kill {}", pid);
+            }
+            println!("cloudflared log: {}", log_path.display());
+            return Ok(());
+        }
+
+        println!("Cached Cloudflare Tunnel is not reachable; starting a fresh one.");
+        if cached_pid_alive && let Some(pid) = cached_pid {
+            stop_process(pid);
+        }
+        cleanup_tunnel_state(&pid_path, &url_path)?;
+    } else if cached_pid_alive {
+        println!("Existing Cloudflare Tunnel state is incomplete; starting a fresh one.");
+        if let Some(pid) = cached_pid {
+            stop_process(pid);
+        }
+        cleanup_tunnel_state(&pid_path, &url_path)?;
+    }
+
+    let cloudflared = ensure_cloudflared(&state_dir).await?;
+    let log_file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&log_path)?;
+    let err_file = log_file.try_clone()?;
+
+    let child = Command::new(&cloudflared)
+        .args(["tunnel", "--url", &local_url])
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(err_file))
+        .spawn()?;
+    let pid = child.id();
+    fs::write(&pid_path, pid.to_string())?;
+
+    let tunnel_url = wait_for_tunnel_url(&log_path).await?;
+    if let Err(err) = wait_for_tunnel_ready(&tunnel_url, &secret, &log_path).await {
+        stop_process(pid);
+        cleanup_tunnel_state(&pid_path, &url_path)?;
+        return Err(err);
+    }
+    fs::write(&url_path, &tunnel_url)?;
+
+    println!("Started temporary Cloudflare Tunnel in the background.");
+    print_agent_block(
+        &tunnel_url,
+        &secret,
+        Some(
+            "这是临时 Cloudflare Tunnel 入口；不需要开放 9091 端口，且已确认当前 endpoint 可以访问 mihomot。cloudflared 进程停止或重启后该 endpoint 会失效，需要重新运行 sudo mihomot tunnel 并把新的 endpoint 发给 agent。",
+        ),
+    );
+    println!("cloudflared pid: {}", pid);
+    println!("cloudflared log: {}", log_path.display());
+    println!("stop tunnel: kill {}", pid);
+
+    Ok(())
 }
 
 fn parse_listen_addr(listen: &str) -> (String, u16) {
@@ -820,9 +906,113 @@ fn parse_listen_addr(listen: &str) -> (String, u16) {
     (default_host, listen.parse().unwrap_or(default_port))
 }
 
+async fn print_startup_agent_block(token_str: &str, listen_host: String, listen_port: u16) {
+    let public_ip = detect_public_ip().await;
+    let server_host = public_ip
+        .clone()
+        .or_else(find_server_ip)
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    let agent_endpoint = format!("http://{}:{}", server_host, listen_port);
+
+    println!();
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("把这段话发给你的 AI agent:");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!();
+    println!(
+        "我已安装 mihomot，请帮我管理我这个服务器({})的代理。",
+        server_host
+    );
+    println!("mihomot endpoint: {}", agent_endpoint);
+    println!(
+        "如果没有安装skill先安装这个skill: {}",
+        mihomo::skill_install_url()
+    );
+    println!("token: {}", token_str);
+    println!();
+    println!("提示:");
+    println!("  1. 请确认服务器防火墙/安全组已开放 TCP {}。", listen_port);
+    if public_ip.is_none() {
+        println!(
+            "  2. 未能自动获取公网 IP；如果上面的 endpoint 不是 agent 可访问地址，请把它改成公网 IP/域名后再发送。"
+        );
+    } else {
+        println!(
+            "  2. 如果上面的 endpoint 不是 agent 可访问地址，请改成正确的公网 IP/域名后再发送。"
+        );
+    }
+    if listen_host == "127.0.0.1" || listen_host == "::1" || listen_host == "localhost" {
+        println!(
+            "  3. 当前 mihomot 只监听 {}，远程 agent 可能无法访问；需要远程管理时请监听 0.0.0.0:{}。",
+            listen_host, listen_port
+        );
+    }
+    println!();
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!();
+}
+
 async fn detect_public_ip() -> Option<String> {
+    if let Some(ip) = detect_interface_public_ip() {
+        return Some(ip);
+    }
+
+    if let Some(ip) = detect_metadata_public_ip().await {
+        return Some(ip);
+    }
+
+    if mihomo_tun_is_present() {
+        return None;
+    }
+
+    detect_online_public_ip().await
+}
+
+fn detect_interface_public_ip() -> Option<String> {
+    if let Ok(ip) = std::env::var("MIHOMOT_PUBLIC_IP") {
+        let ip = ip.trim();
+        if is_public_ipv4(ip) {
+            return Some(ip.to_string());
+        }
+    }
+
+    interface_ipv4_addrs()
+        .into_iter()
+        .filter(|(iface, _)| !is_mihomo_tun_iface(iface))
+        .map(|(_, ip)| ip)
+        .find(|ip| is_public_ipv4(ip))
+}
+
+async fn detect_metadata_public_ip() -> Option<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .no_proxy()
+        .build()
+        .ok()?;
+
+    for url in [
+        "http://100.100.100.200/latest/meta-data/eipv4",
+        "http://100.100.100.200/latest/meta-data/public-ipv4",
+        "http://169.254.169.254/latest/meta-data/public-ipv4",
+    ] {
+        if let Ok(resp) = client.get(url).send().await
+            && resp.status().is_success()
+            && let Ok(text) = resp.text().await
+        {
+            let ip = text.trim();
+            if is_public_ipv4(ip) {
+                return Some(ip.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+async fn detect_online_public_ip() -> Option<String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
+        .no_proxy()
         .build()
         .ok()?;
 
@@ -836,7 +1026,7 @@ async fn detect_public_ip() -> Option<String> {
             && let Ok(text) = resp.text().await
         {
             let ip = text.trim();
-            if ip.parse::<std::net::IpAddr>().is_ok() {
+            if is_public_ipv4(ip) {
                 return Some(ip.to_string());
             }
         }
@@ -845,11 +1035,311 @@ async fn detect_public_ip() -> Option<String> {
     None
 }
 
+fn mihomo_tun_is_present() -> bool {
+    Command::new("ip")
+        .args(["link", "show", "Meta"])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn interface_ipv4_addrs() -> Vec<(String, String)> {
+    let Ok(output) = Command::new("ip")
+        .args(["-o", "-4", "addr", "show", "scope", "global"])
+        .output()
+    else {
+        return Vec::new();
+    };
+
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let _index = fields.next()?;
+            let iface = fields.next()?.to_string();
+            let family = fields.next()?;
+            let cidr = fields.next()?;
+            if family != "inet" {
+                return None;
+            }
+            let ip = cidr.split('/').next()?.to_string();
+            Some((iface, ip))
+        })
+        .collect()
+}
+
+fn is_mihomo_tun_iface(iface: &str) -> bool {
+    iface == "Meta" || iface.starts_with("Meta@")
+}
+
+fn is_usable_local_ipv4(ip: &str) -> bool {
+    let Ok(addr) = ip.parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+
+    !(addr.is_loopback()
+        || addr.is_link_local()
+        || addr.is_broadcast()
+        || addr.is_documentation()
+        || addr.is_unspecified()
+        || addr.octets()[0] == 0
+        || addr.octets()[0] >= 224
+        || (addr.octets()[0] == 198 && (18..=19).contains(&addr.octets()[1]))
+        || (addr.octets()[0] == 100 && (64..=127).contains(&addr.octets()[1])))
+}
+
+fn is_public_ipv4(ip: &str) -> bool {
+    let Ok(addr) = ip.parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+
+    !(addr.is_private()
+        || addr.is_loopback()
+        || addr.is_link_local()
+        || addr.is_broadcast()
+        || addr.is_documentation()
+        || addr.is_unspecified()
+        || addr.octets()[0] == 0
+        || addr.octets()[0] >= 224
+        || (addr.octets()[0] == 198 && (18..=19).contains(&addr.octets()[1]))
+        || (addr.octets()[0] == 100 && (64..=127).contains(&addr.octets()[1])))
+}
+
+fn mihomot_state_dir() -> Result<PathBuf> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    Ok(PathBuf::from(home).join(".config").join("mihomot"))
+}
+
+fn process_is_running(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn stop_process(pid: u32) {
+    let _ = Command::new("kill").arg(pid.to_string()).status();
+}
+
+fn cleanup_tunnel_state(pid_path: &std::path::Path, url_path: &std::path::Path) -> Result<()> {
+    match fs::remove_file(pid_path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
+    }
+
+    match fs::remove_file(url_path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
+    }
+
+    Ok(())
+}
+
+fn read_secret_for_tunnel(config_override: Option<String>) -> Result<String> {
+    let settings_secret = app::App::load_app_settings().api_secret;
+    if !settings_secret.trim().is_empty() && settings_secret != "mihomo" {
+        return Ok(settings_secret);
+    }
+
+    let config_path = config_override
+        .map(PathBuf::from)
+        .unwrap_or_else(config::default_config_path);
+    let secret = config::read_config(&config_path)
+        .ok()
+        .and_then(|config| config.secret)
+        .or_else(|| std::env::var("MIHOMO_SECRET").ok())
+        .unwrap_or_default();
+
+    if secret.trim().is_empty() {
+        anyhow::bail!(
+            "mihomo secret not found. Run the install/upgrade script to write ~/.config/mihomot/settings.json, set MIHOMO_SECRET, or run with sudo -E mihomot tunnel -c /etc/mihomo/config.yaml"
+        );
+    }
+
+    Ok(secret)
+}
+
+async fn ensure_cloudflared(state_dir: &std::path::Path) -> Result<PathBuf> {
+    if let Ok(output) = Command::new("which").arg("cloudflared").output()
+        && output.status.success()
+    {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path.is_empty() {
+            return Ok(PathBuf::from(path));
+        }
+    }
+
+    let target = cloudflared_target()?;
+    let bin_path = state_dir.join("cloudflared");
+    if bin_path.is_file() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&bin_path, fs::Permissions::from_mode(0o755))?;
+        }
+        return Ok(bin_path);
+    }
+
+    println!("cloudflared not found; downloading {}...", target);
+
+    let url = format!(
+        "https://github.com/cloudflare/cloudflared/releases/latest/download/{}",
+        target
+    );
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(900))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()?;
+    let mut last_err = None;
+    for ranked_url in mihomo::ranked_github_urls(&client, &url).await {
+        println!("Trying cloudflared: {}", ranked_url);
+        match client.get(&ranked_url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let bytes = match mihomo::download_response_with_progress(resp, "cloudflared").await
+                {
+                    Ok(bytes) => bytes,
+                    Err(err) => {
+                        last_err = Some(format!("download body error from {ranked_url}: {err}"));
+                        continue;
+                    }
+                };
+                fs::write(&bin_path, &bytes)?;
+
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&bin_path, fs::Permissions::from_mode(0o755))?;
+                }
+
+                return Ok(bin_path);
+            }
+            Ok(resp) => {
+                last_err = Some(format!("HTTP {}", resp.status()));
+            }
+            Err(err) => {
+                last_err = Some(err.to_string());
+            }
+        }
+    }
+
+    anyhow::bail!(
+        "failed to download cloudflared. Last error: {}",
+        last_err.unwrap_or_else(|| "unknown".to_string())
+    );
+}
+
+async fn tunnel_url_is_usable(url: &str, secret: &str) -> bool {
+    probe_tunnel_url(url, secret).await.is_ok()
+}
+
+async fn wait_for_tunnel_ready(url: &str, secret: &str, log_path: &std::path::Path) -> Result<()> {
+    let mut last_err = "not probed".to_string();
+
+    for _ in 0..20 {
+        match probe_tunnel_url(url, secret).await {
+            Ok(()) => return Ok(()),
+            Err(err) => last_err = err.to_string(),
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
+    anyhow::bail!(
+        "Cloudflare Tunnel URL was found, but mihomot API is not reachable through it ({last_err}); see {}",
+        log_path.display()
+    )
+}
+
+async fn probe_tunnel_url(url: &str, secret: &str) -> Result<()> {
+    let status_url = format!("{}/mhmt/status", url.trim_end_matches('/'));
+    let resp = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?
+        .get(status_url)
+        .bearer_auth(secret)
+        .send()
+        .await?;
+
+    if resp.status().is_success() {
+        return Ok(());
+    }
+
+    anyhow::bail!("HTTP {}", resp.status())
+}
+
+fn cloudflared_target() -> Result<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => Ok("cloudflared-linux-amd64"),
+        ("linux", "aarch64") => Ok("cloudflared-linux-arm64"),
+        (os, arch) => anyhow::bail!("unsupported cloudflared platform: {os}/{arch}"),
+    }
+}
+
+async fn wait_for_tunnel_url(log_path: &std::path::Path) -> Result<String> {
+    for _ in 0..30 {
+        if let Ok(file) = fs::File::open(log_path) {
+            let reader = BufReader::new(file);
+            for line in reader.lines().map_while(Result::ok) {
+                if let Some(url) = extract_trycloudflare_url(&line) {
+                    return Ok(url);
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
+    anyhow::bail!(
+        "timed out waiting for cloudflared tunnel URL; see {}",
+        log_path.display()
+    )
+}
+
+fn extract_trycloudflare_url(line: &str) -> Option<String> {
+    line.split_whitespace()
+        .find(|part| part.starts_with("https://") && part.contains(".trycloudflare.com"))
+        .map(|part| {
+            part.trim_matches(|c: char| c == '"' || c == '\'' || c == ',' || c == '.')
+                .to_string()
+        })
+}
+
+fn print_agent_block(endpoint: &str, secret: &str, note: Option<&str>) {
+    let token_str =
+        token::generate_token(secret).unwrap_or_else(|_| "TOKEN_GENERATION_FAILED".into());
+
+    println!();
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("把这段话发给你的 AI agent:");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!();
+    println!("我已安装 mihomot，请帮我管理我这个服务器的代理。");
+    println!("mihomot endpoint: {}", endpoint);
+    println!(
+        "如果没有安装skill先安装这个skill: {}",
+        mihomo::skill_install_url()
+    );
+    println!("token: {}", token_str);
+    if let Some(note) = note {
+        println!();
+        println!("临时入口提示: {}", note);
+    }
+    println!();
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!();
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_edited_config_file, expand_config_path, handle_nav_key, handle_proxies_key,
-        handle_settings_navigation_key, parse_listen_addr, switch_config_file,
+        apply_edited_config_file, expand_config_path, extract_trycloudflare_url, handle_nav_key,
+        handle_proxies_key, handle_settings_navigation_key, is_public_ipv4, is_usable_local_ipv4,
+        parse_listen_addr, switch_config_file,
     };
     use anyhow::Result;
     use crossterm::event::KeyCode;
@@ -1090,5 +1580,26 @@ mod tests {
             app.proxy_latency.get("Node B"),
             Some(&crate::app::ProxyLatencyStatus::Testing)
         );
+    }
+
+    #[test]
+    fn extract_trycloudflare_url_from_cloudflared_log_line() {
+        let line = r#"INF | https://quiet-river-123.trycloudflare.com |"#;
+        assert_eq!(
+            extract_trycloudflare_url(line).as_deref(),
+            Some("https://quiet-river-123.trycloudflare.com")
+        );
+    }
+
+    #[test]
+    fn ip_filters_reject_tun_and_proxy_ranges() {
+        assert!(is_public_ipv4("1.1.1.1"));
+        assert!(!is_public_ipv4("172.28.205.178"));
+        assert!(!is_public_ipv4("198.18.0.1"));
+        assert!(!is_public_ipv4("100.64.0.1"));
+
+        assert!(is_usable_local_ipv4("172.28.205.178"));
+        assert!(!is_usable_local_ipv4("198.18.0.1"));
+        assert!(!is_usable_local_ipv4("100.64.0.1"));
     }
 }
