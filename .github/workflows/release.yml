@@ -25,8 +25,14 @@ jobs:
     outputs:
       tag: ${{ steps.release.outputs.tag }}
       version: ${{ steps.release.outputs.version }}
+      previous_tag: ${{ steps.release.outputs.previous_tag }}
       prerelease: ${{ steps.release.outputs.prerelease }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Resolve tag
         id: release
         shell: bash
@@ -44,6 +50,13 @@ jobs:
 
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+          previous_tag="$(git tag --merged "$tag" --sort=-creatordate \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' \
+            | grep -Fxv "$tag" \
+            | head -n 1 || true)"
+          echo "previous_tag=$previous_tag" >> "$GITHUB_OUTPUT"
+
           if [[ "$tag" == *-* ]]; then
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
           else
@@ -166,11 +179,111 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Generate release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${{ needs.prepare.outputs.tag }}"
+          previous_tag="${{ needs.prepare.outputs.previous_tag }}"
+
+          python3 - <<'PY'
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          tag = os.environ["TAG"]
+          previous_tag = os.environ.get("PREVIOUS_TAG", "").strip()
+
+          if previous_tag:
+              rev_range = f"{previous_tag}..{tag}"
+              compare_url = f"https://github.com/nkanf-dev/mihomot/compare/{previous_tag}...{tag}"
+          else:
+              rev_range = tag
+              compare_url = f"https://github.com/nkanf-dev/mihomot/releases/tag/{tag}"
+
+          log_output = subprocess.check_output(
+              ["git", "log", "--format=%H%x09%s", rev_range],
+              text=True,
+          ).splitlines()
+
+          categories = [
+              ("Features", ["feat"]),
+              ("Bug Fixes", ["fix"]),
+              ("Documentation", ["docs", "doc"]),
+              ("CI", ["ci"]),
+              ("Refactors", ["refactor"]),
+              ("Testing", ["test"]),
+          ]
+          grouped = {title: [] for title, _ in categories}
+          other = []
+
+          for line in log_output:
+              if not line.strip():
+                  continue
+              sha, subject = line.split("\t", 1)
+              normalized = subject.strip()
+              match = re.match(r"^([a-zA-Z0-9_-]+)(\(.+\))?!?:\s+(.*)$", normalized)
+              key = match.group(1).lower() if match else None
+
+              entry = f"* {normalized} ({sha[:7]})"
+              placed = False
+              if key:
+                  for title, prefixes in categories:
+                      if key in prefixes:
+                          grouped[title].append(entry)
+                          placed = True
+                          break
+              if not placed:
+                  other.append(entry)
+
+          lines = [f"## {tag}", ""]
+
+          if previous_tag:
+              lines.append(f"Changes since `{previous_tag}`.")
+              lines.append("")
+
+          emitted = False
+          for title, _ in categories:
+              items = grouped[title]
+              if not items:
+                  continue
+              emitted = True
+              lines.append(f"### {title}")
+              lines.extend(items)
+              lines.append("")
+
+          if other:
+              emitted = True
+              lines.append("### Other Changes")
+              lines.extend(other)
+              lines.append("")
+
+          if not emitted:
+              lines.append("* No user-facing changes were detected in commit subjects.")
+              lines.append("")
+
+          lines.append(f"**Full Changelog**: {compare_url}")
+          lines.append("")
+
+          Path("release-notes.md").write_text("\n".join(lines))
+          PY
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          PREVIOUS_TAG: ${{ needs.prepare.outputs.previous_tag }}
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
           name: ${{ needs.prepare.outputs.tag }}
-          generate_release_notes: true
+          body_path: release-notes.md
           prerelease: ${{ needs.prepare.outputs.prerelease }}
           files: dist/*
