@@ -186,6 +186,8 @@ All `/mhmt/` endpoints require auth: `Authorization: Bearer {secret}` (same secr
 
 | Method | Path | Description |
 |--------|------|-------------|
+| GET | `/mhmt/config/list` | List switchable mihomo YAML configs beside the active config |
+| POST | `/mhmt/config/switch` | Switch active config and reload mihomo |
 | GET | `/mhmt/config/raw` | Return full config.yaml |
 | POST | `/mhmt/config/raw` | Replace config.yaml and reload |
 | GET | `/mhmt/config/backup` | Create and return a timestamped backup |

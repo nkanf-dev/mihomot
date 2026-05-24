@@ -68,7 +68,7 @@ pub fn detect_runtime() -> Result<RuntimeMode> {
 
 /// Check if mihomo is currently running and responding
 pub async fn check_alive(endpoint: &str, secret: &str) -> Result<bool> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder().no_proxy().build()?;
     let url = format!("{}/version", endpoint);
     let mut req = client.get(&url);
     if !secret.is_empty() {
@@ -122,14 +122,16 @@ pub fn start(runtime: &RuntimeMode, config_path: &Path) -> Result<()> {
                         "--restart",
                         "always",
                         "-v",
-                        &format!("{}:/root/.config/mihomo/config.yaml", config_path.display()),
-                        "-v",
                         &format!("{}:/root/.config/mihomo", config_dir),
                         "--cap-add",
                         "NET_ADMIN",
                         "--device",
                         "/dev/net/tun",
                         image,
+                        "-d",
+                        "/root/.config/mihomo",
+                        "-f",
+                        &container_config_path(config_path),
                     ])
                     .output()
                     .context("Failed to create docker container")?;
@@ -146,6 +148,8 @@ pub fn start(runtime: &RuntimeMode, config_path: &Path) -> Result<()> {
                         .unwrap_or(Path::new("."))
                         .to_str()
                         .unwrap_or("."),
+                    "-f",
+                    config_path.to_str().unwrap_or("config.yaml"),
                 ])
                 .status()
                 .context("Failed to start mihomo binary")?;
@@ -158,7 +162,7 @@ pub fn start(runtime: &RuntimeMode, config_path: &Path) -> Result<()> {
 pub async fn reload(endpoint: &str, secret: &str, config_path: &Path) -> Result<()> {
     let content = std::fs::read_to_string(config_path)
         .with_context(|| format!("Failed to read {}", config_path.display()))?;
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder().no_proxy().build()?;
     let url = format!("{}/configs?force=true", endpoint);
 
     let mut bodies = mihomo_config_paths(config_path)
@@ -196,10 +200,18 @@ fn mihomo_config_paths(config_path: &Path) -> Vec<String> {
     let host_path = config_path.to_string_lossy().to_string();
     // Docker mode mounts the host config file at this path in the container.
     if has_docker_container("mihomo") {
-        vec!["/root/.config/mihomo/config.yaml".to_string(), host_path]
+        vec![container_config_path(config_path), host_path]
     } else {
         vec![host_path]
     }
+}
+
+fn container_config_path(config_path: &Path) -> String {
+    let file_name = config_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config.yaml");
+    format!("/root/.config/mihomo/{file_name}")
 }
 
 fn local_binary_path() -> PathBuf {

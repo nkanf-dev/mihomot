@@ -17,6 +17,13 @@ pub struct MihomoConfig {
     pub extra: serde_yaml::Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigCandidate {
+    pub path: PathBuf,
+    pub label: String,
+    pub detail: String,
+}
+
 /// Get the default mihomo config path.
 pub fn default_config_path() -> PathBuf {
     if let Ok(path) = std::env::var("MIHOMOT_CONFIG")
@@ -76,6 +83,56 @@ pub fn restore_from_backup(backup_path: &Path, target_path: &Path) -> Result<()>
     Ok(())
 }
 
+/// Return selectable mihomo YAML config files from the active config directory.
+pub fn list_config_candidates(active_path: &Path) -> Result<Vec<ConfigCandidate>> {
+    let base_dir = active_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let mut paths = Vec::new();
+
+    if base_dir.exists() {
+        for entry in fs::read_dir(&base_dir)? {
+            let path = entry?.path();
+            if is_mihomo_config_file(&path) {
+                paths.push(path);
+            }
+        }
+    }
+
+    if is_mihomo_config_file(active_path) && !paths.contains(&active_path.to_path_buf()) {
+        paths.push(active_path.to_path_buf());
+    }
+
+    paths.sort_by(|left, right| {
+        left.file_name()
+            .cmp(&right.file_name())
+            .then_with(|| left.cmp(right))
+    });
+
+    Ok(paths
+        .into_iter()
+        .map(|path| config_candidate_from_path(path, &base_dir))
+        .collect())
+}
+
+/// Return true when a YAML file looks like a mihomo main config.
+pub fn is_mihomo_config_file(path: &Path) -> bool {
+    if !is_yaml_file(path) {
+        return false;
+    }
+
+    let Ok(config) = read_config(path) else {
+        return false;
+    };
+
+    config.external_controller.is_some()
+        || config.mixed_port.is_some()
+        || config.extra.get("proxies").is_some()
+        || config.extra.get("proxy-groups").is_some()
+        || config.extra.get("rules").is_some()
+}
+
 /// Parse external-controller to get host and port
 pub fn parse_external_controller(ec: &str) -> (String, u16) {
     let ec = ec.trim();
@@ -85,6 +142,31 @@ pub fn parse_external_controller(ec: &str) -> (String, u16) {
         (host.to_string(), port)
     } else {
         ("0.0.0.0".to_string(), 9090)
+    }
+}
+
+fn is_yaml_file(path: &Path) -> bool {
+    path.is_file()
+        && matches!(
+            path.extension().and_then(|extension| extension.to_str()),
+            Some("yaml" | "yml")
+        )
+}
+
+fn config_candidate_from_path(path: PathBuf, base_dir: &Path) -> ConfigCandidate {
+    let label = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .or_else(|| path.file_name().and_then(|value| value.to_str()))
+        .unwrap_or("<unnamed>")
+        .to_string();
+    let detail_path = path.strip_prefix(base_dir).unwrap_or(&path);
+    let detail = detail_path.display().to_string();
+
+    ConfigCandidate {
+        path,
+        label,
+        detail,
     }
 }
 
@@ -164,5 +246,46 @@ secret: test123
         unsafe {
             std::env::remove_var("MIHOMOT_CONFIG");
         }
+    }
+
+    #[test]
+    fn list_config_candidates_filters_non_mihomo_yaml_files() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "mihomot-config-list-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("test directory should be created");
+        let active = dir.join("active.yaml");
+        let other = dir.join("other.yml");
+        let profiles = dir.join("profiles.yaml");
+        let notes = dir.join("notes.txt");
+        fs::write(&active, "mixed-port: 7890\n").expect("active config should be writable");
+        fs::write(&other, "proxies: []\nproxy-groups: []\nrules: []\n")
+            .expect("other config should be writable");
+        fs::write(&profiles, "current: abc\nitems: []\n")
+            .expect("metadata file should be writable");
+        fs::write(&notes, "ignored\n").expect("ignored file should be writable");
+
+        let candidates = list_config_candidates(&active).expect("candidate listing should succeed");
+        let paths: Vec<_> = candidates
+            .iter()
+            .map(|candidate| candidate.path.clone())
+            .collect();
+
+        assert!(paths.contains(&active));
+        assert!(paths.contains(&other));
+        assert!(!paths.contains(&profiles));
+        assert!(!paths.contains(&notes));
+        assert!(candidates.iter().any(|candidate| {
+            candidate.path == active
+                && candidate.label == "active"
+                && candidate.detail == "active.yaml"
+        }));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

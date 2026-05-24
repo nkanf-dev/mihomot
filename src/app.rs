@@ -1,11 +1,11 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 use futures_util::StreamExt;
 use ratatui::widgets::{ListState, TableState};
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -102,12 +102,61 @@ pub enum RealLatencyStatus {
     Failed(String),
 }
 
-#[derive(Clone, PartialEq)]
-pub enum Focus {
-    Groups,
+#[derive(Clone, PartialEq, Debug)]
+pub enum ProxyLatencyStatus {
+    Testing,
+    Success(u64),
+    Failed(String),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Route {
+    Dashboard,
     Proxies,
     Settings,
+    Help,
 }
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Focus {
+    Nav,
+    Content,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ProxyPane {
+    Groups,
+    Proxies,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct NavItem {
+    pub label: &'static str,
+    pub route: Option<Route>,
+}
+
+pub const NAV_ITEMS: [NavItem; 5] = [
+    NavItem {
+        label: "Dashboard",
+        route: Some(Route::Dashboard),
+    },
+    NavItem {
+        label: "Proxies",
+        route: Some(Route::Proxies),
+    },
+    NavItem {
+        label: "Settings",
+        route: Some(Route::Settings),
+    },
+    NavItem {
+        label: "Help",
+        route: Some(Route::Help),
+    },
+    NavItem {
+        label: "Quit",
+        route: None,
+    },
+];
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum ConfigEntry {
@@ -115,6 +164,9 @@ pub enum ConfigEntry {
     ApiSecret,
     TestUrl,
     TestTimeout,
+    ConfigPath,
+    ConfigSwitch,
+    ConfigFile,
     Mode,
     Tun,
     MixedPort,
@@ -129,14 +181,16 @@ pub struct App {
     pub config: Option<Config>,
     pub real_latency_status: RealLatencyStatus,
     pub client: Client,
+    pub latency_client: Client,
     pub app_settings: AppSettings,
+    pub config_path: PathBuf,
 
     pub real_latency_tx: mpsc::Sender<RealLatencyStatus>,
     pub real_latency_rx: mpsc::Receiver<RealLatencyStatus>,
 
-    pub proxy_latency: HashMap<String, Option<u64>>,
-    pub proxy_test_tx: mpsc::Sender<(String, u64)>,
-    pub proxy_test_rx: mpsc::Receiver<(String, u64)>,
+    pub proxy_latency: HashMap<String, ProxyLatencyStatus>,
+    pub proxy_test_tx: mpsc::Sender<(String, ProxyLatencyStatus)>,
+    pub proxy_test_rx: mpsc::Receiver<(String, ProxyLatencyStatus)>,
 
     pub traffic_tx: mpsc::Sender<Traffic>,
     pub traffic_rx: mpsc::Receiver<Traffic>,
@@ -149,11 +203,16 @@ pub struct App {
     pub group_names: Vec<String>,
     pub group_state: ListState,
     pub proxy_state: TableState,
+    pub route: Route,
     pub focus: Focus,
-    pub previous_focus: Focus,
+    pub nav_index: usize,
+    pub proxy_pane: ProxyPane,
     pub show_info_popup: bool,
+    pub show_config_picker: bool,
     pub popup_scroll: u16,
 
+    pub config_candidates: Vec<crate::config::ConfigCandidate>,
+    pub config_picker_state: ListState,
     pub settings_items: Vec<ConfigEntry>,
     pub settings_state: TableState,
     pub is_editing: bool,
@@ -161,6 +220,15 @@ pub struct App {
 
     pub error: Option<String>,
     traffic_monitor_task: Option<JoinHandle<()>>,
+}
+
+struct ProxyLatencyTestContext {
+    base_url: String,
+    secret: String,
+    test_url: String,
+    timeout: u64,
+    client: Client,
+    tx: mpsc::Sender<(String, ProxyLatencyStatus)>,
 }
 
 impl App {
@@ -172,12 +240,17 @@ impl App {
 
         let mut settings_state = TableState::default();
         settings_state.select(Some(0));
+        let mut config_picker_state = ListState::default();
+        config_picker_state.select(Some(0));
 
         let settings_items = vec![
             ConfigEntry::BaseUrl,
             ConfigEntry::ApiSecret,
             ConfigEntry::TestUrl,
             ConfigEntry::TestTimeout,
+            ConfigEntry::ConfigPath,
+            ConfigEntry::ConfigSwitch,
+            ConfigEntry::ConfigFile,
             ConfigEntry::Mode,
             ConfigEntry::Tun,
             ConfigEntry::MixedPort,
@@ -203,8 +276,10 @@ impl App {
             proxies: HashMap::new(),
             config: None,
             real_latency_status: RealLatencyStatus::Pending,
-            client: Client::builder().build().unwrap_or_default(),
+            client: Client::builder().no_proxy().build().unwrap_or_default(),
+            latency_client: Client::builder().build().unwrap_or_default(),
             app_settings,
+            config_path: crate::config::default_config_path(),
             real_latency_tx,
             real_latency_rx,
             proxy_latency: HashMap::new(),
@@ -219,10 +294,15 @@ impl App {
             group_names: Vec::new(),
             group_state,
             proxy_state,
-            focus: Focus::Groups,
-            previous_focus: Focus::Groups,
+            route: Route::Dashboard,
+            focus: Focus::Nav,
+            nav_index: 0,
+            proxy_pane: ProxyPane::Groups,
             show_info_popup: false,
+            show_config_picker: false,
             popup_scroll: 0,
+            config_candidates: Vec::new(),
+            config_picker_state,
             settings_items,
             settings_state,
             is_editing: false,
@@ -333,6 +413,119 @@ impl App {
         self.popup_scroll = self.popup_scroll.saturating_sub(1);
     }
 
+    /// Refresh selectable mihomo YAML config files from the active config directory.
+    pub fn refresh_config_candidates(&mut self) -> Result<()> {
+        let candidates = crate::config::list_config_candidates(&self.config_path)?;
+        let selected = candidates
+            .iter()
+            .position(|candidate| candidate.path == self.config_path)
+            .or(Some(0))
+            .filter(|_| !candidates.is_empty());
+
+        self.config_candidates = candidates;
+        self.config_picker_state.select(selected);
+        Ok(())
+    }
+
+    pub fn next_config_candidate(&mut self) {
+        if self.config_candidates.is_empty() {
+            self.config_picker_state.select(None);
+            return;
+        }
+
+        let i = match self.config_picker_state.selected() {
+            Some(i) if i >= self.config_candidates.len() - 1 => 0,
+            Some(i) => i + 1,
+            None => 0,
+        };
+        self.config_picker_state.select(Some(i));
+    }
+
+    pub fn previous_config_candidate(&mut self) {
+        if self.config_candidates.is_empty() {
+            self.config_picker_state.select(None);
+            return;
+        }
+
+        let i = match self.config_picker_state.selected() {
+            Some(0) | None => self.config_candidates.len() - 1,
+            Some(i) => i - 1,
+        };
+        self.config_picker_state.select(Some(i));
+    }
+
+    pub fn selected_config_candidate(&self) -> Option<PathBuf> {
+        self.config_picker_state
+            .selected()
+            .and_then(|i| self.config_candidates.get(i))
+            .map(|candidate| candidate.path.clone())
+    }
+
+    /// Return the sidebar item under the navigation cursor.
+    pub fn selected_nav_item(&self) -> NavItem {
+        NAV_ITEMS
+            .get(self.nav_index)
+            .copied()
+            .unwrap_or(NAV_ITEMS[0])
+    }
+
+    /// Move the sidebar cursor down, wrapping at the end.
+    pub fn next_nav(&mut self) {
+        self.nav_index = (self.nav_index + 1) % NAV_ITEMS.len();
+    }
+
+    /// Move the sidebar cursor up, wrapping at the start.
+    pub fn previous_nav(&mut self) {
+        self.nav_index = if self.nav_index == 0 {
+            NAV_ITEMS.len() - 1
+        } else {
+            self.nav_index - 1
+        };
+    }
+
+    /// Switch to a top-level route and keep the sidebar selection in sync.
+    pub fn set_route(&mut self, route: Route) {
+        self.route = route;
+        if let Some(index) = NAV_ITEMS.iter().position(|item| item.route == Some(route)) {
+            self.nav_index = index;
+        }
+        self.focus = Focus::Content;
+    }
+
+    /// Activate the current sidebar item; returns true when the item is Quit.
+    pub fn activate_nav(&mut self) -> bool {
+        if let Some(route) = self.selected_nav_item().route {
+            self.set_route(route);
+            false
+        } else {
+            true
+        }
+    }
+
+    /// Toggle keyboard focus between the sidebar and the active page content.
+    pub fn toggle_focus(&mut self) {
+        self.focus = match self.focus {
+            Focus::Nav => Focus::Content,
+            Focus::Content => Focus::Nav,
+        };
+    }
+
+    /// Move keyboard focus to the sidebar without changing the active route.
+    pub fn focus_nav(&mut self) {
+        self.focus = Focus::Nav;
+    }
+
+    /// Select the active pane inside the Proxies page and make that route visible.
+    pub fn set_proxy_pane(&mut self, pane: ProxyPane) {
+        self.proxy_pane = pane;
+        self.route = Route::Proxies;
+        self.focus = Focus::Content;
+        self.nav_index = NAV_ITEMS
+            .iter()
+            .position(|item| item.route == Some(Route::Proxies))
+            .unwrap_or(self.nav_index);
+    }
+
     pub fn next_setting(&mut self) {
         let i = match self.settings_state.selected() {
             Some(i) => {
@@ -369,10 +562,53 @@ impl App {
             request = request.bearer_auth(&self.app_settings.api_secret);
         }
 
-        request.send().await?.error_for_status()?;
+        request
+            .timeout(mihomo_api_timeout())
+            .send()
+            .await?
+            .error_for_status()?;
         // Fetch updated config to sync UI
         self.fetch_config().await?;
         Ok(())
+    }
+
+    pub async fn reload_config_file(&self, path: &Path) -> Result<()> {
+        if self.try_mihomot_config_switch(path).await? {
+            return Ok(());
+        }
+
+        crate::mihomo::reload(
+            &self.app_settings.base_url,
+            &self.app_settings.api_secret,
+            path,
+        )
+        .await
+    }
+
+    async fn try_mihomot_config_switch(&self, path: &Path) -> Result<bool> {
+        let url = format!("{}/mhmt/config/switch", self.app_settings.base_url);
+        let body = serde_json::json!({ "path": path });
+        let mut request = self.client.post(&url).json(&body);
+
+        if !self.app_settings.api_secret.is_empty() {
+            request = request.bearer_auth(&self.app_settings.api_secret);
+        }
+
+        let response = request.timeout(mihomo_api_timeout()).send().await?;
+
+        if response.status() == StatusCode::NOT_FOUND
+            || response.status() == StatusCode::METHOD_NOT_ALLOWED
+        {
+            return Ok(false);
+        }
+
+        if response.status().is_success() {
+            return Ok(true);
+        }
+
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        bail!("mihomot config switch failed: HTTP {status}: {body}");
     }
 
     pub async fn fetch_proxies(&mut self) -> Result<()> {
@@ -383,7 +619,7 @@ impl App {
             request = request.bearer_auth(&self.app_settings.api_secret);
         }
 
-        match request.send().await {
+        match request.timeout(mihomo_api_timeout()).send().await {
             Ok(resp) => {
                 if resp.status().is_success() {
                     match resp.json::<ProxiesResponse>().await {
@@ -398,7 +634,8 @@ impl App {
                                     && let Some(delay) = last.get("delay").and_then(|d| d.as_u64())
                                     && delay > 0
                                 {
-                                    self.proxy_latency.insert(name.clone(), Some(delay));
+                                    self.proxy_latency
+                                        .insert(name.clone(), ProxyLatencyStatus::Success(delay));
                                 }
                             }
 
@@ -451,15 +688,22 @@ impl App {
         if !self.app_settings.api_secret.is_empty() {
             request = request.bearer_auth(&self.app_settings.api_secret);
         }
-        let resp = request.send().await?;
-        if resp.status().is_success() {
-            self.config = Some(resp.json::<Config>().await?);
+        match request.timeout(mihomo_api_timeout()).send().await {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    self.config = Some(resp.json::<Config>().await?);
+                    self.error = None;
+                } else {
+                    self.error = Some(format!("Server returned error: {}", resp.status()));
+                }
+            }
+            Err(e) => self.error = Some(format!("Failed to connect: {}", e)),
         }
         Ok(())
     }
 
     pub fn trigger_latency_test(&mut self) {
-        let client = self.client.clone();
+        let client = self.latency_client.clone();
         let url = self.app_settings.test_url.clone();
         let timeout = self.app_settings.test_timeout;
         let tx = self.real_latency_tx.clone();
@@ -503,47 +747,79 @@ impl App {
         });
     }
 
-    pub fn trigger_group_latency_test(&self) {
-        if let Some(group_name) = self.get_selected_group_name()
-            && let Some(group) = self.proxies.get(group_name)
-            && let Some(all) = &group.all
-        {
-            let base_url = self.app_settings.base_url.clone();
-            let secret = self.app_settings.api_secret.clone();
-            let test_url = self.app_settings.test_url.clone();
-            let timeout = self.app_settings.test_timeout;
-            let tx = self.proxy_test_tx.clone();
-            let client = self.client.clone();
+    pub fn trigger_group_latency_test(&mut self) {
+        let proxy_names = self
+            .get_selected_group_name()
+            .and_then(|group_name| self.proxies.get(group_name))
+            .and_then(|group| group.all.clone());
 
-            for proxy_name in all {
-                let p_name = proxy_name.clone();
-                let my_url = format!(
-                    "{}/proxies/{}/delay?url={}&timeout={}",
-                    base_url,
-                    urlencoding::encode(&p_name),
-                    urlencoding::encode(&test_url),
-                    timeout
-                );
-                let my_client = client.clone();
-                let my_secret = secret.clone();
-                let my_tx = tx.clone();
+        if let Some(proxy_names) = proxy_names {
+            let context = self.proxy_latency_test_context();
 
-                tokio::spawn(async move {
-                    let mut req = my_client.get(&my_url);
-                    if !my_secret.is_empty() {
-                        req = req.bearer_auth(&my_secret);
-                    }
-
-                    if let Ok(resp) = req.send().await
-                        && resp.status().is_success()
-                        && let Ok(json) = resp.json::<serde_json::Value>().await
-                        && let Some(delay) = json.get("delay").and_then(|v| v.as_u64())
-                    {
-                        let _ = my_tx.send((p_name, delay)).await;
-                    }
-                });
+            for proxy_name in proxy_names {
+                self.spawn_proxy_latency_test(proxy_name, &context);
             }
         }
+    }
+
+    pub fn trigger_selected_proxy_latency_test(&mut self) {
+        if let Some(proxy_name) = self.get_selected_proxy_name() {
+            let context = self.proxy_latency_test_context();
+            self.spawn_proxy_latency_test(proxy_name, &context);
+        }
+    }
+
+    fn proxy_latency_test_context(&self) -> ProxyLatencyTestContext {
+        ProxyLatencyTestContext {
+            base_url: self.app_settings.base_url.clone(),
+            secret: self.app_settings.api_secret.clone(),
+            test_url: self.app_settings.test_url.clone(),
+            timeout: self.app_settings.test_timeout,
+            client: self.client.clone(),
+            tx: self.proxy_test_tx.clone(),
+        }
+    }
+
+    fn spawn_proxy_latency_test(&mut self, proxy_name: String, context: &ProxyLatencyTestContext) {
+        self.proxy_latency
+            .insert(proxy_name.clone(), ProxyLatencyStatus::Testing);
+
+        let my_url = format!(
+            "{}/proxies/{}/delay?url={}&timeout={}",
+            context.base_url,
+            urlencoding::encode(&proxy_name),
+            urlencoding::encode(&context.test_url),
+            context.timeout
+        );
+        let my_secret = context.secret.clone();
+        let timeout = context.timeout;
+        let client = context.client.clone();
+        let tx = context.tx.clone();
+
+        tokio::spawn(async move {
+            let mut req = client.get(&my_url);
+            if !my_secret.is_empty() {
+                req = req.bearer_auth(&my_secret);
+            }
+
+            let status = match req.timeout(Duration::from_millis(timeout)).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    match resp.json::<serde_json::Value>().await {
+                        Ok(json) => match json.get("delay").and_then(|v| v.as_u64()) {
+                            Some(delay) => ProxyLatencyStatus::Success(delay),
+                            None => ProxyLatencyStatus::Failed("No delay".to_string()),
+                        },
+                        Err(_) => ProxyLatencyStatus::Failed("Bad JSON".to_string()),
+                    }
+                }
+                Ok(resp) => ProxyLatencyStatus::Failed(format!("HTTP {}", resp.status())),
+                Err(e) if e.is_timeout() => ProxyLatencyStatus::Failed("Timeout".to_string()),
+                Err(e) if e.is_connect() => ProxyLatencyStatus::Failed("Conn Err".to_string()),
+                Err(_) => ProxyLatencyStatus::Failed("Error".to_string()),
+            };
+
+            let _ = tx.send((proxy_name, status)).await;
+        });
     }
 
     pub async fn select_proxy(&self, group_name: &str, proxy_name: &str) -> Result<()> {
@@ -555,7 +831,11 @@ impl App {
             request = request.bearer_auth(&self.app_settings.api_secret);
         }
 
-        request.send().await?.error_for_status()?;
+        request
+            .timeout(mihomo_api_timeout())
+            .send()
+            .await?
+            .error_for_status()?;
         Ok(())
     }
 
@@ -658,6 +938,12 @@ impl App {
             .and_then(|i| self.group_names.get(i))
     }
 
+    /// Return the currently selected proxy group item, if the API returned it.
+    pub fn selected_group(&self) -> Option<&ProxyItem> {
+        self.get_selected_group_name()
+            .and_then(|group_name| self.proxies.get(group_name))
+    }
+
     pub fn get_selected_proxy_name(&self) -> Option<String> {
         if let Some(group_name) = self.get_selected_group_name()
             && let Some(group) = self.proxies.get(group_name)
@@ -670,6 +956,12 @@ impl App {
         }
         None
     }
+
+    /// Return the currently selected proxy node item, if it exists in the API map.
+    pub fn selected_proxy_item(&self) -> Option<&ProxyItem> {
+        self.get_selected_proxy_name()
+            .and_then(|proxy_name| self.proxies.get(&proxy_name))
+    }
 }
 
 impl Drop for App {
@@ -680,10 +972,15 @@ impl Drop for App {
     }
 }
 
+fn mihomo_api_timeout() -> Duration {
+    Duration::from_secs(5)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use anyhow::Result;
+    use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -711,6 +1008,40 @@ mod tests {
         });
 
         Ok(format!("http://{addr}"))
+    }
+
+    async fn spawn_config_reload_server() -> Result<(String, Arc<Mutex<Vec<String>>>)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let request_log = Arc::clone(&requests);
+
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let request_log = Arc::clone(&request_log);
+                tokio::spawn(async move {
+                    let mut buffer = [0_u8; 4096];
+                    let Ok(n) = stream.read(&mut buffer).await else {
+                        return;
+                    };
+                    let request = String::from_utf8_lossy(&buffer[..n]);
+                    let first_line = request.lines().next().unwrap_or_default().to_string();
+                    request_log.lock().unwrap().push(first_line.clone());
+
+                    let status = if first_line.starts_with("POST /mhmt/config/switch") {
+                        "HTTP/1.1 404 Not Found"
+                    } else if first_line.starts_with("PUT /configs") {
+                        "HTTP/1.1 204 No Content"
+                    } else {
+                        "HTTP/1.1 500 Internal Server Error"
+                    };
+                    let response = format!("{status}\r\nContent-Length: 0\r\n\r\n");
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+
+        Ok((format!("http://{addr}"), requests))
     }
 
     #[tokio::test]
@@ -747,6 +1078,135 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nav_activation_updates_route_and_focus() {
+        let mut app = App::new(None, None);
+
+        assert_eq!(app.route, Route::Dashboard);
+        assert_eq!(app.focus, Focus::Nav);
+
+        app.next_nav();
+        assert!(!app.activate_nav());
+
+        assert_eq!(app.route, Route::Proxies);
+        assert_eq!(app.focus, Focus::Content);
+        assert_eq!(app.nav_index, 1);
+
+        app.nav_index = NAV_ITEMS.len() - 1;
+        assert!(app.activate_nav());
+    }
+
+    #[tokio::test]
+    async fn proxy_pane_selection_keeps_proxies_route_active() {
+        let mut app = App::new(None, None);
+
+        app.set_proxy_pane(ProxyPane::Proxies);
+
+        assert_eq!(app.route, Route::Proxies);
+        assert_eq!(app.focus, Focus::Content);
+        assert_eq!(app.proxy_pane, ProxyPane::Proxies);
+        assert_eq!(app.nav_index, 1);
+    }
+
+    #[tokio::test]
+    async fn group_latency_test_marks_nodes_as_testing_immediately() {
+        let mut app = App::new(Some("http://127.0.0.1:1".to_string()), Some(String::new()));
+        app.group_names = vec!["Auto".to_string()];
+        app.group_state.select(Some(0));
+        app.proxies.insert(
+            "Auto".to_string(),
+            make_selector_group("Auto", vec!["Node A", "Node B"]),
+        );
+
+        app.trigger_group_latency_test();
+
+        assert_eq!(
+            app.proxy_latency.get("Node A"),
+            Some(&ProxyLatencyStatus::Testing)
+        );
+        assert_eq!(
+            app.proxy_latency.get("Node B"),
+            Some(&ProxyLatencyStatus::Testing)
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_config_candidates_lists_yaml_files_in_current_directory() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "mihomot-config-candidates-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("test directory should be created");
+        let active = dir.join("active.yaml");
+        let other = dir.join("other.yml");
+        let ignored = dir.join("notes.txt");
+        fs::write(&active, "mixed-port: 7890\n").expect("active config should be writable");
+        fs::write(&other, "mixed-port: 7891\n").expect("other config should be writable");
+        fs::write(&ignored, "ignored\n").expect("ignored file should be writable");
+
+        let mut app = App::new(None, None);
+        app.config_path = active.clone();
+        app.refresh_config_candidates()
+            .expect("candidate refresh should succeed");
+
+        let paths: Vec<_> = app
+            .config_candidates
+            .iter()
+            .map(|candidate| candidate.path.clone())
+            .collect();
+        assert!(paths.contains(&active));
+        assert!(paths.contains(&other));
+        assert!(!paths.contains(&ignored));
+        assert_eq!(app.selected_config_candidate(), Some(active));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn refresh_config_candidates_filters_non_mihomo_yaml_files() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "mihomot-config-filter-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("test directory should be created");
+        let active = dir.join("active.yaml");
+        let subscription = dir.join("work-subscription.yaml");
+        let profiles = dir.join("profiles.yaml");
+        let dns = dir.join("dns_config.yaml");
+        fs::write(&active, "mixed-port: 7890\n").expect("active config should be writable");
+        fs::write(&subscription, "proxies: []\nproxy-groups: []\nrules: []\n")
+            .expect("subscription config should be writable");
+        fs::write(&profiles, "current: abc\nitems: []\n")
+            .expect("profiles metadata should be writable");
+        fs::write(&dns, "dns:\n  enable: true\n").expect("dns config should be writable");
+
+        let mut app = App::new(None, None);
+        app.config_path = active.clone();
+        app.refresh_config_candidates()
+            .expect("candidate refresh should succeed");
+
+        let paths: Vec<_> = app
+            .config_candidates
+            .iter()
+            .map(|candidate| candidate.path.clone())
+            .collect();
+        assert!(paths.contains(&active));
+        assert!(paths.contains(&subscription));
+        assert!(!paths.contains(&profiles));
+        assert!(!paths.contains(&dns));
+        assert_eq!(app.selected_config_candidate(), Some(active));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn update_config_returns_error_for_http_failures() {
         let server_url = spawn_status_server("HTTP/1.1 500 Internal Server Error")
             .await
@@ -776,5 +1236,40 @@ mod tests {
         let result = app.select_proxy("Group", "Proxy").await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn reload_config_file_falls_back_to_native_mihomo_endpoint() {
+        let (server_url, requests) = spawn_config_reload_server()
+            .await
+            .expect("server should start");
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "mihomot-native-reload-fallback-{}-{nanos}.yaml",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            "mixed-port: 7890\nexternal-controller: 127.0.0.1:9090\n",
+        )
+        .expect("test config should be writable");
+
+        let app = App::new(Some(server_url), Some(String::new()));
+        app.reload_config_file(&path)
+            .await
+            .expect("native reload fallback should succeed");
+
+        let requests = requests.lock().unwrap();
+        assert!(
+            requests
+                .iter()
+                .any(|line| line.starts_with("POST /mhmt/config/switch"))
+        );
+        assert!(requests.iter().any(|line| line.starts_with("PUT /configs")));
+
+        let _ = fs::remove_file(&path);
     }
 }
