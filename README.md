@@ -7,7 +7,7 @@ An AI native manager for Mihomo (Clash Meta) built with Rust.
 - Manage a server-side mihomo runtime with an AI-agent friendly token and HTTP API.
 - Use the built-in TUI to inspect traffic, switch proxy groups/nodes, test latency, and edit common settings.
 - Edit, back up, reload, and switch mihomo config files without manually logging into the server for every change.
-- Support multi-subscription setups in two ways: combine multiple `proxy-providers` in one config, or keep multiple full YAML configs in the active config directory and switch between them.
+- Supports multi-subscription setups in two ways: combine multiple `proxy-providers` in one config, or keep multiple full YAML configs in the active config directory and switch between them.
 
 ![mihomot TUI dashboard](img/tui-dashboard.webp)
 
@@ -182,7 +182,7 @@ Use this when each subscription/profile should stay isolated. Put multiple full 
 
 Then switch from the TUI Settings view or through the API:
 
-```bash
+```text
 GET  /mhmt/config/list
 POST /mhmt/config/switch  {"path":"/etc/mihomo/hk.yaml"}
 ```

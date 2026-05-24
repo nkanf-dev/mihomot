@@ -15,7 +15,6 @@ mod token;
 mod ui;
 
 const TUI_FRAME_INTERVAL: Duration = Duration::from_millis(250);
-const TUI_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Parser, Debug)]
 #[command(version, about = "mihomot - AI native mihomo manager")]
@@ -288,9 +287,8 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App) ->
         }
 
         let render_wait = TUI_FRAME_INTERVAL.saturating_sub(last_render.elapsed());
-        let poll_wait = TUI_EVENT_POLL_INTERVAL.min(render_wait);
 
-        if event::poll(poll_wait)? {
+        if event::poll(render_wait)? {
             let key = match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     should_render = true;

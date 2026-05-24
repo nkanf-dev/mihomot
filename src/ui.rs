@@ -14,6 +14,12 @@ use crate::app::{
 
 struct Theme;
 
+// Color thresholds classify latency; the wider gauge range keeps typical node delays visually distinct.
+const LATENCY_GOOD_MS: u64 = 200;
+const LATENCY_WARN_MS: u64 = 500;
+const LATENCY_GAUGE_BEST_MS: u64 = 50;
+const LATENCY_GAUGE_WORST_MS: u64 = 1000;
+
 impl Theme {
     const BG: Color = Color::Rgb(22, 24, 31);
     const PANEL: Color = Color::Rgb(30, 32, 41);
@@ -862,26 +868,23 @@ fn format_speed(bytes: u64) -> String {
 
 fn latency_color(latency: Option<u64>) -> Color {
     match latency {
-        Some(ms) if ms < 200 => Theme::GOOD,
-        Some(ms) if ms < 500 => Theme::WARN,
+        Some(ms) if ms < LATENCY_GOOD_MS => Theme::GOOD,
+        Some(ms) if ms < LATENCY_WARN_MS => Theme::WARN,
         Some(_) => Theme::BAD,
         None => Theme::MUTED,
     }
 }
 
 fn latency_gauge_percent(ms: u64) -> u16 {
-    const BEST_MS: u64 = 50;
-    const WORST_MS: u64 = 1000;
-
-    if ms <= BEST_MS {
+    if ms <= LATENCY_GAUGE_BEST_MS {
         return 100;
     }
-    if ms >= WORST_MS {
+    if ms >= LATENCY_GAUGE_WORST_MS {
         return 0;
     }
 
-    let range = WORST_MS - BEST_MS;
-    let remaining = WORST_MS - ms;
+    let range = LATENCY_GAUGE_WORST_MS - LATENCY_GAUGE_BEST_MS;
+    let remaining = LATENCY_GAUGE_WORST_MS - ms;
     ((remaining * 100) / range) as u16
 }
 
