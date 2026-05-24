@@ -118,8 +118,6 @@ pub fn list_config_candidates(active_path: &Path) -> Result<Vec<(ConfigCandidate
         .collect())
 }
 
-
-
 fn parse_if_mihomo_config_file(path: &Path) -> Option<MihomoConfig> {
     if !is_yaml_file(path) {
         return None;

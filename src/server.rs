@@ -9,13 +9,12 @@ use axum::{
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::RwLock;
-
 use crate::config;
 
 #[derive(Clone)]
-struct AppState {
-    config_path: Arc<RwLock<PathBuf>>,
+pub struct AppState {
+    config_path: Arc<tokio::sync::RwLock<PathBuf>>,
+    mutation_lock: Arc<tokio::sync::Mutex<()>>,
     secret: String,
     mihomo_endpoint: String,
 }
@@ -34,7 +33,8 @@ pub async fn start_server(
 ) -> Result<(), anyhow::Error> {
     let config_path = std::fs::canonicalize(&config_path).unwrap_or(config_path);
     let state = Arc::new(AppState {
-        config_path: Arc::new(RwLock::new(config_path)),
+        config_path: Arc::new(tokio::sync::RwLock::new(config_path)),
+        mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
         secret,
         mihomo_endpoint,
     });
@@ -88,13 +88,21 @@ async fn get_config_list(State(state): State<Arc<AppState>>, headers: HeaderMap)
     }
 
     let active_path = state.config_path.read().await.clone();
-    match config::list_config_candidates(&active_path) {
+    let active_path_for_task = active_path.clone();
+    let state_clone = Arc::clone(&state);
+
+    let scan_result = tokio::task::spawn_blocking(move || {
+        let candidates = config::list_config_candidates(&active_path_for_task)?;
+        let filtered = candidates
+            .into_iter()
+            .filter(|(candidate, parsed)| validate_switch_target_config(&state_clone, &candidate.path, parsed).is_ok())
+            .map(|(candidate, _)| candidate)
+            .collect::<Vec<_>>();
+        Ok::<_, anyhow::Error>(filtered)
+    }).await.unwrap_or_else(|e| Err(anyhow::anyhow!("Join error: {}", e)));
+
+    match scan_result {
         Ok(configs) => {
-            let configs = configs
-                .into_iter()
-                .filter(|(candidate, parsed)| validate_switch_target_config(&state, &candidate.path, parsed).is_ok())
-                .map(|(candidate, _)| candidate)
-                .collect::<Vec<_>>();
             let body = serde_json::json!({
                 "active": active_path,
                 "configs": configs,
@@ -118,6 +126,8 @@ async fn post_config_switch(
     if !verify_auth(&headers, &state.secret) {
         return unauthorized();
     }
+
+    let _mutation_guard = state.mutation_lock.lock().await;
 
     let current_path = state.config_path.read().await.clone();
     let target_path = match resolve_switch_target(&current_path, &payload.path) {
@@ -189,8 +199,8 @@ async fn post_config_raw(
         return unauthorized();
     }
 
-    let config_path_lock = state.config_path.write().await;
-    let config_path = config_path_lock.clone();
+    let _mutation_guard = state.mutation_lock.lock().await;
+    let config_path = state.config_path.read().await.clone();
 
     // Backup before writing
     let backup_path = match config::backup_config(&config_path) {
@@ -686,7 +696,8 @@ mod tests {
             .expect("missing-controller config should be writable");
 
         let state = AppState {
-            config_path: Arc::new(RwLock::new(active.clone())),
+            config_path: Arc::new(tokio::sync::RwLock::new(active.clone())),
+            mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
             secret: "s".to_string(),
             mihomo_endpoint: "http://127.0.0.1:9090".to_string(),
         };
@@ -739,7 +750,8 @@ mod tests {
         .expect("wrong-port config should be writable");
 
         let state = Arc::new(AppState {
-            config_path: Arc::new(RwLock::new(active.clone())),
+            config_path: Arc::new(tokio::sync::RwLock::new(active.clone())),
+            mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
             secret: String::new(),
             mihomo_endpoint,
         });

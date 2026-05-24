@@ -630,19 +630,33 @@ fn edit_config_file_on_disk(path: &Path) -> Result<bool> {
     }
 
     let initial = config::read_raw(path)?;
-    let temp_path = unique_temp_config_path(path);
-    fs::write(&temp_path, &initial)
-        .with_context(|| format!("Failed to create temp editor file {}", temp_path.display()))?;
+    let extension = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("yaml");
+
+    let mut temp_file = tempfile::Builder::new()
+        .prefix("mihomot_config_")
+        .suffix(&format!(".{}", extension))
+        .tempfile()
+        .with_context(|| "Failed to securely create temp editor file")?;
+
+    use std::io::Write;
+    temp_file.write_all(initial.as_bytes())
+        .with_context(|| "Failed to write initial content to temp editor file")?;
+    temp_file.flush()?;
+
+    let temp_path = temp_file.path().to_path_buf();
 
     let editor_result = run_external_editor_for_file(&temp_path);
     if let Err(err) = editor_result {
-        let _ = fs::remove_file(&temp_path);
         return Err(err);
     }
 
     let edited = fs::read_to_string(&temp_path)
         .with_context(|| format!("Failed to read edited temp file {}", temp_path.display()))?;
-    let _ = fs::remove_file(&temp_path);
+    
+    drop(temp_file);
 
     apply_edited_config_file(path, &initial, &edited)
 }

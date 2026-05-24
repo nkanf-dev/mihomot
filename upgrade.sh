@@ -155,7 +155,7 @@ install_systemd_service_if_present() {
   # Preserve MIHOMOT_REGION from the existing service file if present
   region_env=""
   if as_root test -f "$existing_service"; then
-    region_env="$(as_root grep 'MIHOMOT_REGION' "$existing_service" 2>/dev/null | head -1 || true)"
+    region_env="$(as_root grep -E '^Environment="?MIHOMOT_REGION=' "$existing_service" 2>/dev/null | head -1 || true)"
   fi
 
   {

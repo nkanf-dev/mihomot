@@ -253,8 +253,7 @@ fn draw_content_outline(f: &mut Frame, app: &App, area: Rect, title: &str) {
         Block::default()
             .title(title)
             .borders(Borders::ALL)
-            .border_style(focus_border_style(app.focus == Focus::Content))
-            .style(Style::default().bg(Theme::BG)),
+            .border_style(focus_border_style(app.focus == Focus::Content)),
         area,
     );
 }
