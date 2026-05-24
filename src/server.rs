@@ -12,7 +12,7 @@ use std::sync::Arc;
 use crate::config;
 
 #[derive(Clone)]
-pub struct AppState {
+struct AppState {
     config_path: Arc<tokio::sync::RwLock<PathBuf>>,
     mutation_lock: Arc<tokio::sync::Mutex<()>>,
     secret: String,
@@ -208,11 +208,10 @@ async fn post_config_raw(
     let config_path = state.config_path.read().await.clone();
 
     let config_path_for_task = config_path.clone();
-    let body_for_task = body.clone();
     
     let disk_result = tokio::task::spawn_blocking(move || {
         let backup_path = config::backup_config(&config_path_for_task)?;
-        config::write_raw(&config_path_for_task, &body_for_task)?;
+        config::write_raw(&config_path_for_task, &body)?;
         Ok::<_, anyhow::Error>(backup_path)
     }).await.unwrap_or_else(|e| Err(anyhow::anyhow!("Disk IO task failed: {}", e)));
 

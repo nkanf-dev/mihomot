@@ -646,7 +646,8 @@ fn edit_config_file_on_disk(path: &Path) -> Result<bool> {
         .with_context(|| "Failed to write initial content to temp editor file")?;
     temp_file.flush()?;
 
-    let temp_path = temp_file.path().to_path_buf();
+    let temp_path_keeper = temp_file.into_temp_path();
+    let temp_path = temp_path_keeper.to_path_buf();
 
     let editor_result = run_external_editor_for_file(&temp_path);
     if let Err(err) = editor_result {
@@ -656,7 +657,7 @@ fn edit_config_file_on_disk(path: &Path) -> Result<bool> {
     let edited = fs::read_to_string(&temp_path)
         .with_context(|| format!("Failed to read edited temp file {}", temp_path.display()))?;
     
-    drop(temp_file);
+    drop(temp_path_keeper);
 
     apply_edited_config_file(path, &initial, &edited)
 }
