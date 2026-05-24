@@ -240,7 +240,7 @@ If opening TCP `9091` is inconvenient, start a temporary Cloudflare Tunnel:
 sudo mihomot tunnel
 ```
 
-`sudo mihomot tunnel` installs `cloudflared` into root's mihomot state directory when it is not already available, starts it in the background, reuses an existing tunnel on the next run, and prints an agent message with a `https://*.trycloudflare.com` endpoint. Use `sudo` so the command can read the root-readable `/etc/mihomo/config.yaml` secret. The endpoint is temporary: it remains useful only while the background `cloudflared` process is alive.
+`sudo mihomot tunnel` installs `cloudflared` into root's mihomot state directory when it is not already available, starts it in the background, reuses an existing tunnel on the next run, and prints an agent message with a `https://*.trycloudflare.com` endpoint. Use `sudo` so the command can read the root-readable `/etc/mihomo/config.yaml` secret. The endpoint is temporary: it remains useful only while the background `cloudflared` process is alive. When `mihomot serve` starts on a host without a detectable public IP, it will try to bring up the same temporary tunnel automatically.
 
 ## HTTP API
 

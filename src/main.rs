@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use app::ConfigEntry;
 use clap::{Parser, Subcommand};
-use std::fs::{self, OpenOptions};
+use std::fs::{self};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -15,6 +15,34 @@ mod token;
 mod ui;
 
 const TUI_FRAME_INTERVAL: Duration = Duration::from_millis(250);
+const TUNNEL_LOG_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const TUNNEL_START_TIMEOUT: Duration = Duration::from_secs(8);
+const TUNNEL_READY_TIMEOUT: Duration = Duration::from_secs(12);
+const TUNNEL_START_RETRIES: usize = 3;
+const TUNNEL_RETRY_DELAY: Duration = Duration::from_millis(500);
+
+#[derive(Clone, Copy)]
+struct TunnelStartOptions {
+    retries: usize,
+    start_timeout: Duration,
+    ready_timeout: Duration,
+}
+
+impl TunnelStartOptions {
+    fn standard() -> Self {
+        Self {
+            retries: TUNNEL_START_RETRIES,
+            start_timeout: TUNNEL_START_TIMEOUT,
+            ready_timeout: TUNNEL_READY_TIMEOUT,
+        }
+    }
+}
+
+struct TunnelSession {
+    url: String,
+    pid: Option<u32>,
+    log_path: PathBuf,
+}
 
 #[derive(Parser, Debug)]
 #[command(version, about = "mihomot - AI native mihomo manager")]
@@ -184,8 +212,64 @@ async fn run_serve(config_override: Option<String>, listen: String) -> Result<()
         }
     }
 
+    let public_ip = detect_public_ip().await;
+
     if mihomo_ready {
-        print_startup_agent_block(&token_str, listen_host, listen_port).await;
+        if public_ip.is_some() {
+            print_startup_agent_block(&token_str, public_ip, listen_host, listen_port, None).await;
+        } else {
+            println!(
+                "No public IP detected; will try a temporary Cloudflare Tunnel after the API starts."
+            );
+            let token_for_task = token_str.clone();
+            let secret_for_task = secret.clone();
+            let listen_host_for_task = listen_host.clone();
+            let local_url = local_tunnel_url(&listen_host, listen_port);
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                match ensure_tunnel_session(
+                    &local_url,
+                    &secret_for_task,
+                    TunnelStartOptions::standard(),
+                )
+                .await
+                {
+                    Ok(session) => {
+                        if let Some(pid) = session.pid {
+                            println!("Automatic Cloudflare Tunnel ready (pid {}).", pid);
+                            println!("cloudflared pid: {}", pid);
+                            println!("stop tunnel: kill {}", pid);
+                        } else {
+                            println!("Automatic Cloudflare Tunnel reused.");
+                        }
+                        println!("cloudflared log: {}", session.log_path.display());
+                        print_agent_block(
+                            &session.url,
+                            &secret_for_task,
+                            Some(
+                                "这是临时 Cloudflare Tunnel 入口；未检测到公网 IP，已自动启用。cloudflared 进程停止或重启后该 endpoint 会失效。",
+                            ),
+                        );
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "Automatic Cloudflare Tunnel failed after {} attempts: {err:#}",
+                            TUNNEL_START_RETRIES
+                        );
+                        print_startup_agent_block(
+                            &token_for_task,
+                            None,
+                            listen_host_for_task,
+                            listen_port,
+                            Some(
+                                "自动 Cloudflare Tunnel 启动失败；如果上面的 endpoint 不可达，可稍后手动运行 sudo mihomot tunnel。".to_string(),
+                            ),
+                        )
+                        .await;
+                    }
+                }
+            });
+        }
     } else {
         eprintln!(
             "mihomo is still not responding; agent instructions will be printed after it is healthy."
@@ -830,90 +914,23 @@ fn find_server_ip() -> Option<String> {
 }
 
 async fn run_tunnel(local_url: String, config_override: Option<String>) -> Result<()> {
-    let state_dir = mihomot_state_dir()?;
-    fs::create_dir_all(&state_dir)?;
-
-    let pid_path = state_dir.join("cloudflared.pid");
-    let url_path = state_dir.join("cloudflared.url");
-    let log_path = state_dir.join("cloudflared.log");
     let secret = read_secret_for_tunnel(config_override)?;
-
-    let cached_pid = fs::read_to_string(&pid_path)
-        .ok()
-        .and_then(|pid_text| pid_text.trim().parse::<u32>().ok());
-    let cached_pid_alive = cached_pid.map(process_is_running).unwrap_or(false);
-
-    if let Ok(url) = fs::read_to_string(&url_path) {
-        let url = url.trim().to_string();
-        if !url.is_empty() && tunnel_url_is_usable(&url, &secret).await {
-            if let Some(pid) = cached_pid {
-                println!("Reusing existing Cloudflare Tunnel (pid {}).", pid);
-            } else {
-                println!("Reusing existing Cloudflare Tunnel.");
-            }
-            print_agent_block(
-                &url,
-                &secret,
-                Some(
-                    "这是临时 Cloudflare Tunnel 入口；已确认当前 endpoint 可以访问 mihomot。进程停止或重启后该 endpoint 会失效，需要重新运行 sudo mihomot tunnel 并把新的 endpoint 发给 agent。",
-                ),
-            );
-            if let Some(pid) = cached_pid {
-                println!("cloudflared pid: {}", pid);
-                println!("stop tunnel: kill {}", pid);
-            }
-            println!("cloudflared log: {}", log_path.display());
-            return Ok(());
-        }
-
-        println!("Cached Cloudflare Tunnel is not reachable; starting a fresh one.");
-        if cached_pid_alive && let Some(pid) = cached_pid {
-            stop_process(pid);
-        }
-        cleanup_tunnel_state(&pid_path, &url_path)?;
-    } else if cached_pid_alive {
-        println!("Existing Cloudflare Tunnel state is incomplete; starting a fresh one.");
-        if let Some(pid) = cached_pid {
-            stop_process(pid);
-        }
-        cleanup_tunnel_state(&pid_path, &url_path)?;
-    }
-
-    let cloudflared = ensure_cloudflared(&state_dir).await?;
-    let log_file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&log_path)?;
-    let err_file = log_file.try_clone()?;
-
-    let child = Command::new(&cloudflared)
-        .args(["tunnel", "--url", &local_url, "--no-autoupdate"])
-        .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(err_file))
-        .spawn()?;
-    let pid = child.id();
-    fs::write(&pid_path, pid.to_string())?;
-
-    let tunnel_url = wait_for_tunnel_url(&log_path).await?;
-    if let Err(err) = wait_for_tunnel_ready(&tunnel_url, &secret, &log_path).await {
-        stop_process(pid);
-        cleanup_tunnel_state(&pid_path, &url_path)?;
-        return Err(err);
-    }
-    fs::write(&url_path, &tunnel_url)?;
+    let session =
+        ensure_tunnel_session(&local_url, &secret, TunnelStartOptions::standard()).await?;
 
     println!("Started temporary Cloudflare Tunnel in the background.");
     print_agent_block(
-        &tunnel_url,
+        &session.url,
         &secret,
         Some(
             "这是临时 Cloudflare Tunnel 入口；不需要开放 9091 端口，且已确认当前 endpoint 可以访问 mihomot。cloudflared 进程停止或重启后该 endpoint 会失效，需要重新运行 sudo mihomot tunnel 并把新的 endpoint 发给 agent。",
         ),
     );
-    println!("cloudflared pid: {}", pid);
-    println!("cloudflared log: {}", log_path.display());
-    println!("stop tunnel: kill {}", pid);
+    if let Some(pid) = session.pid {
+        println!("cloudflared pid: {}", pid);
+        println!("stop tunnel: kill {}", pid);
+    }
+    println!("cloudflared log: {}", session.log_path.display());
 
     Ok(())
 }
@@ -932,8 +949,13 @@ fn parse_listen_addr(listen: &str) -> (String, u16) {
     (default_host, listen.parse().unwrap_or(default_port))
 }
 
-async fn print_startup_agent_block(token_str: &str, listen_host: String, listen_port: u16) {
-    let public_ip = detect_public_ip().await;
+async fn print_startup_agent_block(
+    token_str: &str,
+    public_ip: Option<String>,
+    listen_host: String,
+    listen_port: u16,
+    extra_note: Option<String>,
+) {
     let server_host = public_ip
         .clone()
         .or_else(find_server_ip)
@@ -972,6 +994,9 @@ async fn print_startup_agent_block(token_str: &str, listen_host: String, listen_
             "  3. 当前 mihomot 只监听 {}，远程 agent 可能无法访问；需要远程管理时请监听 0.0.0.0:{}。",
             listen_host, listen_port
         );
+    }
+    if let Some(note) = extra_note {
+        println!("  4. {}", note);
     }
     println!();
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -1149,7 +1174,11 @@ fn process_is_running(pid: u32) -> bool {
 }
 
 fn stop_process(pid: u32) {
-    let _ = Command::new("kill").arg(pid.to_string()).status();
+    let _ = Command::new("kill")
+        .arg(pid.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 fn cleanup_tunnel_state(pid_path: &std::path::Path, url_path: &std::path::Path) -> Result<()> {
@@ -1269,22 +1298,170 @@ async fn ensure_cloudflared(state_dir: &std::path::Path) -> Result<PathBuf> {
     );
 }
 
+async fn ensure_tunnel_session(
+    local_url: &str,
+    secret: &str,
+    options: TunnelStartOptions,
+) -> Result<TunnelSession> {
+    let state_dir = mihomot_state_dir()?;
+    fs::create_dir_all(&state_dir)?;
+
+    let pid_path = state_dir.join("cloudflared.pid");
+    let url_path = state_dir.join("cloudflared.url");
+    let log_path = state_dir.join("cloudflared.log");
+
+    let cached_pid = fs::read_to_string(&pid_path)
+        .ok()
+        .and_then(|pid_text| pid_text.trim().parse::<u32>().ok());
+    let cached_pid_alive = cached_pid.map(process_is_running).unwrap_or(false);
+
+    if let Ok(url) = fs::read_to_string(&url_path) {
+        let url = url.trim().to_string();
+        if !url.is_empty() && tunnel_url_is_usable(&url, secret).await {
+            return Ok(TunnelSession {
+                url,
+                pid: cached_pid,
+                log_path,
+            });
+        }
+
+        println!("Cached Cloudflare Tunnel is not reachable; starting a fresh one.");
+        if cached_pid_alive && let Some(pid) = cached_pid {
+            stop_process(pid);
+        }
+        cleanup_tunnel_state(&pid_path, &url_path)?;
+    } else if cached_pid_alive {
+        println!("Existing Cloudflare Tunnel state is incomplete; starting a fresh one.");
+        if let Some(pid) = cached_pid {
+            stop_process(pid);
+        }
+        cleanup_tunnel_state(&pid_path, &url_path)?;
+    }
+
+    let cloudflared = ensure_cloudflared(&state_dir).await?;
+    let mut last_err = None;
+
+    for attempt in 1..=options.retries {
+        fs::File::create(&log_path)?;
+        let pid = start_cloudflared_with_shell(&cloudflared, local_url, &log_path)?;
+        fs::write(&pid_path, pid.to_string())?;
+
+        let result = async {
+            let tunnel_url =
+                wait_for_tunnel_url(&log_path, Some(pid), options.start_timeout).await?;
+            wait_for_tunnel_ready(&tunnel_url, secret, &log_path, options.ready_timeout).await?;
+            fs::write(&url_path, &tunnel_url)?;
+            Ok::<_, anyhow::Error>(tunnel_url)
+        }
+        .await;
+
+        match result {
+            Ok(url) => {
+                return Ok(TunnelSession {
+                    url,
+                    pid: Some(pid),
+                    log_path,
+                });
+            }
+            Err(err) => {
+                last_err = Some(err);
+                stop_process(pid);
+                cleanup_tunnel_state(&pid_path, &url_path)?;
+                if attempt < options.retries {
+                    eprintln!(
+                        "Cloudflare Tunnel attempt {attempt}/{} failed; retrying...",
+                        options.retries
+                    );
+                    tokio::time::sleep(TUNNEL_RETRY_DELAY).await;
+                }
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("cloudflared tunnel start failed")))
+}
+
+fn start_cloudflared_with_shell(
+    cloudflared: &std::path::Path,
+    local_url: &str,
+    log_path: &std::path::Path,
+) -> Result<u32> {
+    let command = format!(
+        "{} tunnel --url {} --no-autoupdate </dev/null >>{} 2>&1 & printf '%s\\n' \"$!\"",
+        shell_quote(&cloudflared.to_string_lossy()),
+        shell_quote(local_url),
+        shell_quote(&log_path.to_string_lossy())
+    );
+
+    let mut last_err = None;
+    for (shell, flag) in [("bash", "-lc"), ("sh", "-c")] {
+        match Command::new(shell).args([flag, &command]).output() {
+            Ok(output) if output.status.success() => {
+                let pid_text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let pid = pid_text.parse::<u32>().with_context(|| {
+                    format!("failed to parse cloudflared pid from {shell} output: {pid_text:?}")
+                })?;
+                return Ok(pid);
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                last_err = Some(if stderr.is_empty() {
+                    format!("{shell} exited with status {}", output.status)
+                } else {
+                    format!("{shell} exited with status {}: {stderr}", output.status)
+                });
+            }
+            Err(err) => last_err = Some(format!("{shell} failed: {err}")),
+        }
+    }
+
+    anyhow::bail!(
+        "failed to start cloudflared via shell. Last error: {}",
+        last_err.unwrap_or_else(|| "unknown".to_string())
+    )
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn local_tunnel_url(listen_host: &str, listen_port: u16) -> String {
+    if listen_host.contains(':') && listen_host != "0.0.0.0" {
+        format!("http://[::1]:{listen_port}")
+    } else {
+        format!("http://127.0.0.1:{listen_port}")
+    }
+}
+
 async fn tunnel_url_is_usable(url: &str, secret: &str) -> bool {
     probe_tunnel_url(url, secret).await.is_ok()
 }
 
-async fn wait_for_tunnel_ready(url: &str, secret: &str, log_path: &std::path::Path) -> Result<()> {
+async fn wait_for_tunnel_ready(
+    url: &str,
+    secret: &str,
+    log_path: &std::path::Path,
+    timeout: Duration,
+) -> Result<()> {
     let mut last_err = "not probed".to_string();
 
-    for i in 0..60 {
-        if i % 10 == 0 && i > 0 {
-            println!("  still waiting for tunnel readiness ({}s elapsed)...", i);
+    let deadline = Instant::now() + timeout;
+    let mut elapsed_notice = 0_u64;
+    while Instant::now() < deadline {
+        let elapsed = deadline.saturating_duration_since(Instant::now()).as_secs();
+        let spent = timeout.as_secs().saturating_sub(elapsed);
+        if spent >= elapsed_notice + 5 && spent > 0 {
+            elapsed_notice = spent;
+            println!(
+                "  still waiting for tunnel readiness ({}s elapsed)...",
+                spent
+            );
         }
         match probe_tunnel_url(url, secret).await {
             Ok(()) => return Ok(()),
             Err(err) => last_err = err.to_string(),
         }
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
     anyhow::bail!(
@@ -1319,23 +1496,59 @@ fn cloudflared_target() -> Result<&'static str> {
     }
 }
 
-async fn wait_for_tunnel_url(log_path: &std::path::Path) -> Result<String> {
-    for _ in 0..60 {
+async fn wait_for_tunnel_url(
+    log_path: &std::path::Path,
+    pid: Option<u32>,
+    timeout: Duration,
+) -> Result<String> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
         if let Ok(file) = fs::File::open(log_path) {
             let reader = BufReader::new(file);
+            let mut failure_line = None;
             for line in reader.lines().map_while(Result::ok) {
                 if let Some(url) = extract_trycloudflare_url(&line) {
                     return Ok(url);
                 }
+                if line.contains("failed to request quick Tunnel:")
+                    || line.contains("failed to connect to an edge")
+                {
+                    failure_line = Some(line);
+                }
+            }
+            if let Some(line) = failure_line {
+                anyhow::bail!("{line}");
             }
         }
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        if let Some(pid) = pid
+            && !process_is_running(pid)
+        {
+            anyhow::bail!(
+                "cloudflared exited before publishing a tunnel URL; last log lines:\n{}",
+                tail_file(log_path, 8)
+            );
+        }
+        tokio::time::sleep(TUNNEL_LOG_POLL_INTERVAL).await;
     }
 
     anyhow::bail!(
-        "timed out waiting for cloudflared tunnel URL; see {}",
-        log_path.display()
+        "timed out waiting for cloudflared tunnel URL; last log lines:\n{}",
+        tail_file(log_path, 8)
     )
+}
+
+fn tail_file(path: &std::path::Path, max_lines: usize) -> String {
+    let Ok(text) = fs::read_to_string(path) else {
+        return path.display().to_string();
+    };
+    let lines = text.lines().collect::<Vec<_>>();
+    let start = lines.len().saturating_sub(max_lines);
+    let tail = lines[start..].join("\n");
+    if tail.is_empty() {
+        path.display().to_string()
+    } else {
+        tail
+    }
 }
 
 fn extract_trycloudflare_url(line: &str) -> Option<String> {
@@ -1627,6 +1840,12 @@ mod tests {
             extract_trycloudflare_url(line).as_deref(),
             Some("https://quiet-river-123.trycloudflare.com")
         );
+    }
+
+    #[test]
+    fn shell_quote_wraps_single_quotes_safely() {
+        assert_eq!(crate::shell_quote("abc"), "'abc'");
+        assert_eq!(crate::shell_quote("a'b"), "'a'\"'\"'b'");
     }
 
     #[test]
