@@ -671,7 +671,7 @@ fn apply_edited_config_file(path: &Path, initial: &str, edited: &str) -> Result<
 
     let backup_path = config::backup_config(path)?;
     config::write_raw(path, edited)
-        .with_context(|| format!("Backup saved at {}", backup_path.display()))?;
+        .with_context(|| format!("Failed to write edited config to {} (backup saved at {})", path.display(), backup_path.display()))?;
     Ok(true)
 }
 

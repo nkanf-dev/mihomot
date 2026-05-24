@@ -127,17 +127,22 @@ async fn post_config_switch(
         return unauthorized();
     }
 
-    let _mutation_guard = state.mutation_lock.lock().await;
-
     let current_path = state.config_path.read().await.clone();
-    let target_path = match resolve_switch_target(&current_path, &payload.path) {
+    let state_clone = Arc::clone(&state);
+    let payload_path = payload.path.clone();
+
+    let validation_result = tokio::task::spawn_blocking(move || {
+        let target_path = resolve_switch_target(&current_path, &payload_path)?;
+        validate_switch_target(&state_clone, &target_path)?;
+        Ok::<_, anyhow::Error>(target_path)
+    }).await.unwrap_or_else(|e| Err(anyhow::anyhow!("Validation task failed: {}", e)));
+
+    let target_path = match validation_result {
         Ok(path) => path,
         Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
 
-    if let Err(e) = validate_switch_target(&state, &target_path) {
-        return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
-    }
+    let _mutation_guard = state.mutation_lock.lock().await;
 
     match crate::mihomo::reload(&state.mihomo_endpoint, &state.secret, &target_path).await {
         Ok(()) => {
@@ -467,19 +472,40 @@ fn target_endpoint_matches_current(endpoint: &str, target_config: &config::Mihom
     let Some(external_controller) = target_config.external_controller.as_deref() else {
         return false;
     };
-    let (_, target_port) = config::parse_external_controller(external_controller);
-    parse_endpoint_port(endpoint) == Some(target_port)
+    
+    let (endpoint_host, endpoint_port) = parse_endpoint_host_port(endpoint);
+    let endpoint_host_port = if let Some(p) = endpoint_port {
+        format!("{}:{}", endpoint_host, p)
+    } else {
+        endpoint_host.clone()
+    };
+
+    // Normalize both to SocketAddr for reliable comparison if possible
+    let target_addr = external_controller.parse::<std::net::SocketAddr>();
+    let endpoint_addr = endpoint_host_port.parse::<std::net::SocketAddr>();
+
+    if let (Ok(t), Ok(e)) = (target_addr, endpoint_addr) {
+        return t == e;
+    }
+
+    // Fallback to strict string-based host and port equality
+    let (target_host, target_port) = config::parse_external_controller(external_controller);
+
+    target_host == endpoint_host && Some(target_port) == endpoint_port
 }
 
-fn parse_endpoint_port(endpoint: &str) -> Option<u16> {
+fn parse_endpoint_host_port(endpoint: &str) -> (String, Option<u16>) {
     let without_scheme = endpoint
         .strip_prefix("http://")
         .or_else(|| endpoint.strip_prefix("https://"))
         .unwrap_or(endpoint);
     let host_port = without_scheme.split('/').next().unwrap_or(without_scheme);
-    host_port
-        .rsplit_once(':')
-        .and_then(|(_, port)| port.parse::<u16>().ok())
+
+    if let Some((host, port)) = host_port.rsplit_once(':') {
+        (host.to_string(), port.parse::<u16>().ok())
+    } else {
+        (host_port.to_string(), None)
+    }
 }
 
 /// Forward non-mihomot paths to the native mihomo API.
@@ -711,13 +737,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_endpoint_port_handles_http_urls() {
-        assert_eq!(parse_endpoint_port("http://127.0.0.1:9090"), Some(9090));
+    fn parse_endpoint_host_port_handles_http_urls() {
+        assert_eq!(parse_endpoint_host_port("http://127.0.0.1:9090"), ("127.0.0.1".to_string(), Some(9090)));
         assert_eq!(
-            parse_endpoint_port("https://example.com:9443/x"),
-            Some(9443)
+            parse_endpoint_host_port("https://example.com:9443/x"),
+            ("example.com".to_string(), Some(9443))
         );
-        assert_eq!(parse_endpoint_port("http://example.com"), None);
+        assert_eq!(parse_endpoint_host_port("http://example.com"), ("example.com".to_string(), None));
     }
 
     #[tokio::test]
