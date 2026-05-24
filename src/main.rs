@@ -5,7 +5,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-
 mod app;
 mod config;
 mod mihomo;

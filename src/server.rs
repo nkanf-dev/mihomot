@@ -108,12 +108,17 @@ async fn get_config_list(State(state): State<Arc<AppState>>, headers: HeaderMap)
     .await
     .unwrap_or_else(|e| {
         eprintln!("Join error listing configs: {}", e);
-        Err(anyhow::anyhow!("Internal server error scanning configurations"))
+        Err(anyhow::anyhow!(
+            "Internal server error scanning configurations"
+        ))
     });
 
     match scan_result {
         Ok(configs) => {
-            let active_id = active_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let active_id = active_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
             let body = serde_json::json!({
                 "active": active_id,
                 "configs": configs,
@@ -152,7 +157,9 @@ async fn post_config_switch(
     .await
     .unwrap_or_else(|e| {
         eprintln!("Validation task panic: {}", e);
-        Err(anyhow::anyhow!("Validation failed due to an internal error"))
+        Err(anyhow::anyhow!(
+            "Validation failed due to an internal error"
+        ))
     });
 
     let target_path = match validation_result {
@@ -241,7 +248,9 @@ async fn post_config_raw(
     .await
     .unwrap_or_else(|e| {
         eprintln!("Disk IO task panic: {}", e);
-        Err(anyhow::anyhow!("Internal server error during disk operation"))
+        Err(anyhow::anyhow!(
+            "Internal server error during disk operation"
+        ))
     });
 
     let backup_path = match disk_result {
