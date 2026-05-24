@@ -348,11 +348,7 @@ fn draw_latency_gauge(f: &mut Frame, app: &App, area: Rect) {
         }
         Some(ProxyLatencyStatus::Success(ms)) => {
             let color = latency_color(Some(*ms));
-            (
-                format!("{} ms", ms),
-                color,
-                (1000.0 / (*ms as f64).max(10.0) * 100.0).min(100.0) as u16,
-            )
+            (format!("{} ms", ms), color, latency_gauge_percent(*ms))
         }
         Some(ProxyLatencyStatus::Failed(msg)) => (format!("Err: {msg}"), Theme::BAD, 100),
         None if selected_proxy_name.is_some() => ("Untested".to_string(), Theme::MUTED, 0),
@@ -873,6 +869,22 @@ fn latency_color(latency: Option<u64>) -> Color {
     }
 }
 
+fn latency_gauge_percent(ms: u64) -> u16 {
+    const BEST_MS: u64 = 50;
+    const WORST_MS: u64 = 1000;
+
+    if ms <= BEST_MS {
+        return 100;
+    }
+    if ms >= WORST_MS {
+        return 0;
+    }
+
+    let range = WORST_MS - BEST_MS;
+    let remaining = WORST_MS - ms;
+    ((remaining * 100) / range) as u16
+}
+
 fn proxy_latency_display(latency: Option<&ProxyLatencyStatus>) -> (String, Style) {
     match latency {
         Some(ProxyLatencyStatus::Testing) => (
@@ -1225,9 +1237,20 @@ mod tests {
     #[tokio::test]
     async fn dashboard_shows_selected_node_latency() {
         let mut app = test_app();
+        app.group_names = vec!["Auto".to_string()];
         app.set_route(Route::Dashboard);
         app.group_state.select(Some(0));
         app.proxy_state.select(Some(0));
+        app.proxies.insert(
+            "Auto".to_string(),
+            ProxyItem {
+                name: Some("Auto".to_string()),
+                proxy_type: Some("Selector".to_string()),
+                now: Some("Node A".to_string()),
+                all: Some(vec!["Node A".to_string(), "Node B".to_string()]),
+                extra: serde_json::Map::new(),
+            },
+        );
         app.proxy_latency
             .insert("Node A".to_string(), ProxyLatencyStatus::Testing);
 
@@ -1236,6 +1259,14 @@ mod tests {
         assert!(screen.contains("Selected Node Latency"));
         assert!(screen.contains("Node A"));
         assert!(screen.contains("Testing selected node"));
+    }
+
+    #[test]
+    fn latency_gauge_preserves_typical_latency_variation() {
+        assert_eq!(latency_gauge_percent(50), 100);
+        assert!(latency_gauge_percent(120) > latency_gauge_percent(500));
+        assert!(latency_gauge_percent(500) > latency_gauge_percent(900));
+        assert_eq!(latency_gauge_percent(1000), 0);
     }
 
     #[tokio::test]

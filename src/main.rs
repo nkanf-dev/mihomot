@@ -5,6 +5,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 mod app;
 mod config;
@@ -13,7 +14,8 @@ mod server;
 mod token;
 mod ui;
 
-const TUI_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+const TUI_FRAME_INTERVAL: Duration = Duration::from_millis(250);
+const TUI_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Parser, Debug)]
 #[command(version, about = "mihomot - AI native mihomo manager")]
@@ -260,27 +262,44 @@ async fn run_tui(
 async fn run_app(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App) -> Result<()> {
     use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 
-    loop {
-        terminal.draw(|f| ui::draw(f, app))?;
+    let mut should_render = true;
+    let mut last_render = Instant::now() - TUI_FRAME_INTERVAL;
 
+    loop {
         if let Ok(status) = app.real_latency_rx.try_recv() {
             app.real_latency_status = status;
+            should_render = true;
         }
 
         while let Ok((name, latency_status)) = app.proxy_test_rx.try_recv() {
             app.proxy_latency.insert(name, latency_status);
+            should_render = true;
         }
 
         while let Ok(traffic) = app.traffic_rx.try_recv() {
             app.on_traffic(traffic);
+            should_render = true;
         }
 
-        if event::poll(TUI_FRAME_INTERVAL)? {
+        if should_render || last_render.elapsed() >= TUI_FRAME_INTERVAL {
+            terminal.draw(|f| ui::draw(f, app))?;
+            should_render = false;
+            last_render = Instant::now();
+        }
+
+        let render_wait = TUI_FRAME_INTERVAL.saturating_sub(last_render.elapsed());
+        let poll_wait = TUI_EVENT_POLL_INTERVAL.min(render_wait);
+
+        if event::poll(poll_wait)? {
             let key = match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => key,
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    should_render = true;
+                    key
+                }
                 Event::Resize(_, _) => {
                     terminal.autoresize()?;
                     terminal.clear()?;
+                    should_render = true;
                     continue;
                 }
                 _ => continue,
