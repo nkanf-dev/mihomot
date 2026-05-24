@@ -2,6 +2,15 @@
 
 An AI native manager for Mihomo (Clash Meta) built with Rust.
 
+## Features
+
+- Manage a server-side mihomo runtime with an AI-agent friendly token and HTTP API.
+- Use the built-in TUI to inspect traffic, switch proxy groups/nodes, test latency, and edit common settings.
+- Edit, back up, reload, and switch mihomo config files without manually logging into the server for every change.
+- Support multi-subscription setups in two ways: combine multiple `proxy-providers` in one config, or keep multiple full YAML configs in the active config directory and switch between them.
+
+![mihomot TUI dashboard](img/tui-dashboard.webp)
+
 ## Installation
 
 ### One-line Install (Linux)
@@ -132,6 +141,53 @@ mihomot
 ```
 
 mihomot will auto-detect or install the mihomo kernel, start it, generate a token, and print a message you can copy to your AI agent.
+
+## Managing Multiple Subscriptions
+
+mihomot supports two practical multi-subscription workflows. Choose based on whether you want one merged runtime view or isolated profiles you can switch between.
+
+### Option 1: Mix Subscriptions in One Config
+
+Use this when you want nodes from multiple subscription URLs to appear together in the same proxy group.
+
+```yaml
+proxy-providers:
+  Provider1:
+    type: http
+    url: "https://sub1.example.com"
+    interval: 3600
+  Provider2:
+    type: http
+    url: "https://sub2.example.com"
+    interval: 3600
+
+proxy-groups:
+  - name: Proxy
+    type: select
+    use:
+      - Provider1
+      - Provider2
+```
+
+### Option 2: Switch Between Multiple YAML Configs
+
+Use this when each subscription/profile should stay isolated. Put multiple full mihomo YAML configs beside the active config. For example, if mihomot runs with `/etc/mihomo/config.yaml`, place alternatives such as:
+
+```text
+/etc/mihomo/config.yaml
+/etc/mihomo/us.yaml
+/etc/mihomo/hk.yaml
+/etc/mihomo/work.yaml
+```
+
+Then switch from the TUI Settings view or through the API:
+
+```bash
+GET  /mhmt/config/list
+POST /mhmt/config/switch  {"path":"/etc/mihomo/hk.yaml"}
+```
+
+Switchable files must look like mihomo main configs, not subscription metadata files. They should contain fields such as `external-controller`, `mixed-port`, `proxies`, `proxy-providers`, `proxy-groups`, or `rules`. The target config must stay in the same directory as the active config and keep a compatible `secret` / `external-controller`, so mihomot can continue controlling the running mihomo process after switching.
 
 ## CLI
 

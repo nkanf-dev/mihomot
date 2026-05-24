@@ -82,9 +82,23 @@ mihomo API 的 endpoint 和 secret 与 mihomot 相同。高级场景下也可以
 5. 检查返回结果，失败则告知用户
 ```
 
-### 4.3 多配置文件切换
+### 4.3 多订阅与多配置文件切换
 
-服务器可能在同一个 mihomo 配置目录下保存多个可切换 YAML。推荐把所有订阅主配置都放在当前 active config 同目录，例如 active config 是 `/etc/mihomo/config.yaml` 时，把 `/etc/mihomo/us.yaml`、`/etc/mihomo/hk.yaml` 等文件放在同一目录。切换时：
+用户说“多订阅”时，先区分目标：
+
+1. **多个订阅混合到同一个运行配置**：编辑当前 config.yaml，在 `proxy-providers` 中放多个 provider，并在同一个 `proxy-groups[].use` 中引用它们。这样多个订阅的节点会出现在同一代理组里。
+2. **多个订阅/配置文件自由切换**：把多个完整 mihomo YAML 主配置放在当前 active config 同目录。这样每个订阅或使用场景保持独立，适合“香港配置”“美国配置”“工作配置”之间切换。
+
+多配置文件方案推荐把所有订阅主配置都放在当前 active config 同目录，例如 active config 是 `/etc/mihomo/config.yaml` 时：
+
+```text
+/etc/mihomo/config.yaml
+/etc/mihomo/us.yaml
+/etc/mihomo/hk.yaml
+/etc/mihomo/work.yaml
+```
+
+切换时：
 
 ```
 1. GET /mhmt/config/list
@@ -103,7 +117,7 @@ mihomo API 的 endpoint 和 secret 与 mihomot 相同。高级场景下也可以
 
 ## 5. 常见复杂操作指引
 
-### 多订阅混合
+### 多订阅方案一：混合到同一个 config.yaml
 
 在 config.yaml 的 `proxy-providers` 中添加多个 provider，在 `proxy-group` 的 `use` 字段中引用多个：
 
@@ -125,6 +139,20 @@ proxy-groups:
       - Provider1
       - Provider2
 ```
+
+### 多订阅方案二：同目录多个 YAML 自由切换
+
+当用户希望多个订阅互不混合，或每个订阅有独立规则、DNS、TUN、分组设计时，使用多配置文件切换：
+
+```
+1. GET /mhmt/config/list
+2. 根据用户描述选择目标配置，例如 hk/us/work
+3. POST /mhmt/config/switch  body: {"path": "/etc/mihomo/hk.yaml"}
+4. GET /mhmt/status 确认切换成功
+5. GET /proxies 检查代理组是否符合目标配置
+```
+
+不要把订阅客户端的元数据文件当成 mihomo 主配置。可切换文件应是完整 YAML，通常包含 `proxy-providers`、`proxy-groups`、`rules`、`mixed-port`、`external-controller` 等字段。
 
 ### 链式代理
 
