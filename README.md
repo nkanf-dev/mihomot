@@ -352,6 +352,10 @@ App settings are stored in `~/.config/mihomot/settings.json`.
 
 These can be configured within the TUI Settings view.
 
+## Acknowledgements
+
+Thanks to [linux.do](https://linux.do/) for the community discussion and support around tools like this.
+
 ## License
 
 MIT
